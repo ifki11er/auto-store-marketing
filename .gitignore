@@ -223,4 +223,6 @@ docs/
 output/
 test/
 kakao_places.db
+res/*.pickle
 font/
+kakao_places_filtered.db
