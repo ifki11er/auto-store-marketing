@@ -137,17 +137,36 @@ def photos_for(browser, place_url, folder, limit, availability=None):
         section.or_(empty).first.wait_for(state="attached", timeout=15000)
         if not section.count() and empty.count():
             return []
-        # The photo tab's list excludes profile pictures and other page images.
+        # 사진 영역이 먼저 나타나고 이미지 목록은 나중에 채워질 수 있다.
+        try:
+            page.wait_for_function("""() => Array.from(document.querySelectorAll('.view_photolist .list_photo img')).some(img =>
+                ['data-original', 'data-src', 'src'].some(attr => {
+                    const value = img.getAttribute(attr);
+                    if (!value) return false;
+                    try {
+                        const host = new URL(value, location.href).hostname.toLowerCase();
+                        return host.endsWith('.daumcdn.net') || host.endsWith('.kakaocdn.net');
+                    } catch { return false; }
+                }))""", timeout=15000)
+        except PlaywrightTimeout as exc:
+            body = page.locator("body").inner_text()
+            if any(s in body for s in ("등록된 사진이 없습니다", "사진이 없습니다", "사진이 없어요")):
+                return []
+            raise CollectionError("사진 목록이 제한 시간 안에 로딩되지 않았습니다") from exc
         candidates = page.locator(".view_photolist .list_photo img")
         urls = []
         for i in range(candidates.count()):
             el = candidates.nth(i)
-            src = el.get_attribute("data-original") or el.get_attribute("data-src") or el.get_attribute("src")
-            if src:
+            for attr in ("data-original", "data-src", "src"):
+                src = el.get_attribute(attr)
+                if not src:
+                    continue
                 src = urljoin(page.url, src)
                 host = (urlsplit(src).hostname or "").lower()
-                if (host.endswith(".daumcdn.net") or host.endswith(".kakaocdn.net")) and src not in urls:
-                    urls.append(src)
+                if host.endswith(".daumcdn.net") or host.endswith(".kakaocdn.net"):
+                    if src not in urls:
+                        urls.append(src)
+                    break
         if not urls:
             body = page.locator("body").inner_text()
             if any(s in body for s in ("등록된 사진이 없습니다", "사진이 없습니다", "사진이 없어요")):
@@ -186,7 +205,7 @@ def output_text(response):
 
 
 def analyze(client, photos):
-    content = [{"type": "input_text", "text": "각 사진을 입력 순서대로 한국어로 분석하세요. 보이는 음식, 공간, 분위기와 영상에 활용할 특징만 적고 보이지 않는 내용은 추측하지 마세요."}]
+    content = [{"type": "input_text", "text": "각 사진을 입력 순서대로 한국어로 분석하세요. 보이는 음식, 공간, 분위기와 영상에 활용할 특징을 적고, 글자가 보이는지와 대략적인 위치 및 눈에 띄는 정도도 알려주세요. 보이지 않거나 읽을 수 없는 내용은 추측하지 마세요."}]
     for index, photo in enumerate(photos, 1):
         content.append({"type": "input_text", "text": f"사진 {index}: {photo.name}"})
         mime = mimetypes.guess_type(photo.name)[0]
@@ -547,8 +566,6 @@ def main(argv=None, single=False):
                         continue
                     print(f"가게 처리: {place_id} {place['place_name']}", flush=True)
                     folder = args.output / place_id
-                    folder.mkdir(parents=True, exist_ok=True)
-                    write_json(folder / "01_place.json", place)
                     try:
                         availability = place_availability(browser, place["place_url"])
                         if not availability[1]:
@@ -560,20 +577,25 @@ def main(argv=None, single=False):
                             raise
                         print(f"후기 수집 시간 초과: {place_id} 건너뜀 ({exc})", flush=True)
                         continue
-                    write_json(folder / "02_reviews.json", reviews)
                     if not reviews:
                         print("후기 없음: 후기 없이 진행", flush=True)
-                    try:
-                        photos = photos_for(browser, place["place_url"], folder / "03_photos", args.max_photos, availability)
-                    except CollectionError as exc:
-                        if single or args.place_id or not isinstance(exc.__cause__, PlaywrightTimeout):
-                            raise
-                        print(f"사진 수집 시간 초과: {place_id} 건너뜀 ({exc})", flush=True)
-                        continue
+                    with tempfile.TemporaryDirectory() as temp_dir:
+                        try:
+                            photos = photos_for(browser, place["place_url"], Path(temp_dir) / "photos", args.max_photos, availability)
+                        except CollectionError as exc:
+                            if single or args.place_id or not isinstance(exc.__cause__, PlaywrightTimeout):
+                                raise
+                            print(f"사진 수집 시간 초과: {place_id} 건너뜀 ({exc})", flush=True)
+                            continue
+                        if not photos:
+                            print("사진 없음: 건너뜀", flush=True)
+                            continue
+                        photo_folder = folder / "03_photos"
+                        photo_folder.mkdir(parents=True, exist_ok=True)
+                        photos = [Path(shutil.move(str(photo), str(photo_folder / photo.name))) for photo in photos]
+                    write_json(folder / "01_place.json", place)
+                    write_json(folder / "02_reviews.json", reviews)
                     write_json(folder / "04_analysis_photos.json", photo_manifest(photos))
-                    if not photos:
-                        print("사진 없음: 건너뜀", flush=True)
-                        continue
                     analysis = analyze(recorded_client(client, folder, "analysis", "04"), photos)
                     (folder / "04_analysis.txt").write_text(analysis, encoding="utf-8")
                     result = plan(recorded_client(client, folder, "plan", "05"), place, reviews, analysis, photos)
