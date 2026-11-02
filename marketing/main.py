@@ -524,16 +524,11 @@ def recorded_client(client, folder, stage, number):
     def create(**kwargs):
         nonlocal attempts
         attempts += 1
-        if stage == "plan":
-            write_json(folder / f"{number}_gpt_{stage}_request_{attempts}.json", kwargs)
-        else:
-            write_json(folder / f"{number}_gpt_{stage}_request.json", kwargs)
+        suffix = f"_{attempts}" if stage == "plan" and attempts > 1 else ""
+        write_json(folder / f"{number}_gpt_{stage}_request{suffix}.json", kwargs)
         response = client.responses.create(**kwargs)
         record_token_usage(folder, stage, response)
-        if stage == "plan":
-            write_json(folder / f"{number}_gpt_{stage}_response_{attempts}.json", response.model_dump(mode="json"))
-        else:
-            write_json(folder / f"{number}_gpt_{stage}_response.json", response.model_dump(mode="json"))
+        write_json(folder / f"{number}_gpt_{stage}_response{suffix}.json", response.model_dump(mode="json"))
         return response
 
     return SimpleNamespace(responses=SimpleNamespace(create=create))
@@ -549,10 +544,28 @@ def result_folder(output, place_id, publication, now):
     if publication is None:
         day, slot = now.astimezone(KOREA_TIME), "업로드없음"
     else:
-        publish_at, immediate = publication
+        publish_at, _ = publication
         day = publish_at.astimezone(KOREA_TIME)
-        slot = "즉시공개" if immediate else day.strftime("%H-%M")
+        slot = day.strftime("%H%M")
     return output / day.strftime("%Y-%m-%d") / slot / place_id
+
+
+def allocated_publications(history, channel):
+    allocated = []
+    for entry in history.places.values():
+        if entry.get("지역") != channel:
+            continue
+        value = entry.get("업로드_시간") or entry.get("예정_공개_시간")
+        if value:
+            allocated.append(datetime.fromisoformat(value))
+    return allocated
+
+
+def next_result_publication(schedule, upload_enabled, allocated):
+    if upload_enabled:
+        return schedule.next_publication(datetime.now(KOREA_TIME), allocated)
+    planned = schedule.next_planned_publication(allocated)
+    return (planned, False) if planned is not None else None
 
 
 def main(argv=None, single=False):
@@ -576,10 +589,10 @@ def main(argv=None, single=False):
     if not single and upload_setting not in {"true", "false"}:
         raise ValueError("YOUTUBE_UPLOAD_ENABLED는 true 또는 false로 설정하세요")
     upload_enabled = not single and upload_setting == "true"
-    schedule = UploadSchedule.from_environment(os.environ) if upload_enabled else None
+    schedule = UploadSchedule.from_environment(os.environ)
     if not single:
         print(f"유튜브 업로드: {'사용' if upload_enabled else '사용 안 함'}", flush=True)
-    if schedule:
+    if upload_enabled:
         missing = [channel for channel in CHANNEL_ORDER if not (ROOT / "res" / f"{channel}.pickle").is_file()]
         if missing:
             raise ValueError("유튜브 인증 파일이 없습니다: " + ", ".join(missing))
@@ -597,9 +610,8 @@ def main(argv=None, single=False):
         try:
             completed = 0
             for rows in groups:
-                if schedule and all(schedule.next_publication(datetime.now(KOREA_TIME),
-                    [datetime.fromisoformat(entry["업로드_시간"]) for entry in history.places.values()
-                     if entry.get("지역") == channel and entry.get("업로드_상태") == "완료" and entry.get("업로드_시간")]) is None
+                if schedule and all(next_result_publication(schedule, upload_enabled,
+                    allocated_publications(history, channel)) is None
                     for channel in CHANNEL_ORDER):
                     print("모든 지역의 공개 기간 일정이 완료되었습니다", flush=True)
                     break
@@ -624,9 +636,8 @@ def main(argv=None, single=False):
                         if not channel:
                             print(f"지역 채널 없음: {place_id} 건너뜀", flush=True)
                             continue
-                        allocated = [datetime.fromisoformat(entry["업로드_시간"]) for entry in history.places.values()
-                                     if entry.get("지역") == channel and entry.get("업로드_상태") == "완료" and entry.get("업로드_시간")]
-                        if schedule.next_publication(datetime.now(KOREA_TIME), allocated) is None:
+                        allocated = allocated_publications(history, channel)
+                        if next_result_publication(schedule, upload_enabled, allocated) is None:
                             break
                     completed_videos = (args.output / place_id / "video.mp4", ROOT / "test" / "results" / place_id / "video.mp4")
                     if history.contains(place_id) or any(path.is_file() and path.stat().st_size > 0 for path in completed_videos):
@@ -679,7 +690,7 @@ def main(argv=None, single=False):
                     raw_video = folder / "06_video_raw.mp4"
                     generate_video(args.comfy_url, selected_photos(result, photos), result["minimax_prompt"], raw_video, reference_audio)
                     add_subtitles(raw_video, folder / "video.mp4", result["15초_스크립트"], subtitle_name="06_subtitles.srt", place_name=place["place_name"])
-                    publication = schedule.next_publication(datetime.now(KOREA_TIME), allocated) if schedule else None
+                    publication = next_result_publication(schedule, upload_enabled, allocated) if schedule else None
                     destination = result_folder(args.output, place_id, publication, datetime.now(KOREA_TIME))
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     if destination.exists():
@@ -692,14 +703,14 @@ def main(argv=None, single=False):
                         except OSError:
                             pass
                     folder = destination
-                    history.add(place_id, channel)
-                    if schedule:
+                    history.add(place_id, channel, publication[0] if schedule and not upload_enabled and publication else None)
+                    if upload_enabled:
                         if publication is None:
                             print(f"공개 기간 종료: {place_id} 영상은 생성되었으나 업로드하지 않았습니다", flush=True)
                             return
                         publish_at, immediate = publication
                         history.set_upload(place_id, publish_at, "진행중")
-                        video_id = upload_video(ROOT / "res" / f"{channel}.pickle", folder / "video.mp4", result, publish_at, immediate)
+                        video_id = upload_video(ROOT / "res" / f"{channel}.pickle", folder / "video.mp4", result, publish_at, immediate, place.get("place_name"))
                         history.set_upload(place_id, publish_at, "완료", video_id)
                         print(f"유튜브 업로드 완료: {channel} {publish_at.isoformat()} ({video_id})", flush=True)
                     print(f"완료: {folder}", flush=True)

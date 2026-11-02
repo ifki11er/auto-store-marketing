@@ -14,16 +14,10 @@ CATEGORY_PROMPTS = {
     "FD6": "FD6.md",
 }
 FORMAT_PROMPTS = {
-    "인플루언서형": "influencer.md",
     "브이로그형": "vlog.md",
-    "드라마형": "drama.md",
-    "꽁트형": "skit.md",
-    "재미형": "fun.md",
     "정보형": "informational.md",
     "고급 광고형": "premium_ad.md",
     "체험형": "experience.md",
-    "인터뷰형": "interview.md",
-    "상황 공감형": "relatable.md",
     "셀카형": "selfie.md",
 }
 

@@ -229,3 +229,4 @@ kakao_places_filtered.db
 completed_places.json
 *.wav
 res/technam_client_secret.json
+no_photo_places.json

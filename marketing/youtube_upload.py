@@ -1,9 +1,10 @@
 """지역별 Google OAuth 인증으로 유튜브에 영상을 올린다."""
 import pickle
+import re
 from datetime import timezone
 
 
-def upload_video(credentials_path, video_path, plan, publish_at, immediate):
+def upload_video(credentials_path, video_path, plan, publish_at, immediate, place_name):
     from google.auth.transport.requests import Request
     from googleapiclient.discovery import build
     from googleapiclient.http import MediaFileUpload
@@ -17,7 +18,14 @@ def upload_video(credentials_path, video_path, plan, publish_at, immediate):
     title, description, tags = (plan.get(key) for key in ("유튜브_제목", "유튜브_본문", "유튜브_태그"))
     if not isinstance(title, str) or not title.strip() or not isinstance(description, str) or not isinstance(tags, list) or any(not isinstance(tag, str) for tag in tags):
         raise ValueError("기획에 유효한 유튜브 제목, 본문, 태그가 필요합니다")
-    description = description.rstrip() + "\n\n---------\n이런 영상 어떤가요? 이런 영상을 매일 만들고 싶다면 구독하고 채널 설명을 확인해 주세요."
+    hashtag = "".join(char for char in (place_name or "") if char.isalnum() or char == "_")
+    if hashtag:
+        suffix = " #" + hashtag[:98]
+        title = title.strip()
+        if not title.endswith(suffix.strip()):
+            title = title[:100 - len(suffix)].rstrip() + suffix
+    description = re.sub(r"(?<=[.!?。！？])[ \t]+(?=\S)", "\n", description.rstrip())
+    description += "\n\n---------\n이런 영상 어떤가요? 이런 영상을 매일 만들고 싶다면 구독하고 채널 설명을 확인해 주세요."
     status = {"privacyStatus": "public" if immediate else "private"}
     if not immediate:
         status["publishAt"] = publish_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")

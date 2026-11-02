@@ -72,6 +72,27 @@ class UploadSchedule:
             day += timedelta(days=1)
         return None
 
+    def next_planned_publication(self, allocated):
+        """검수용 영상에 설정된 공개 시간대를 순서대로 배정한다."""
+        existing = []
+        for value in allocated:
+            if value.tzinfo is None or value.utcoffset() is None:
+                raise ValueError("기존 공개·예약 시각에는 시간대가 필요합니다")
+            local = value.astimezone(KOREA_TIME)
+            if self.start_date <= local.date() <= self.end_date:
+                existing.append(local)
+        day = self.start_date
+        while day <= self.end_date:
+            daily = [value for value in existing if value.date() == day]
+            if len(daily) < self.daily_count:
+                occupied_slots = {value.replace(second=0, microsecond=0) for value in daily}
+                for slot_time in self.publish_times:
+                    slot = datetime.combine(day, slot_time, KOREA_TIME)
+                    if slot not in occupied_slots:
+                        return slot
+            day += timedelta(days=1)
+        return None
+
 
 def iter_publication_rounds(schedule, now, allocations=None):
     """기본적으로 모든 채널이 비어 있다고 가정하고 공개 시각을 순회한다."""
