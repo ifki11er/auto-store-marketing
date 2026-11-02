@@ -57,7 +57,20 @@ class CompletedPlaces:
         for directory in set(map(Path, directories)):
             if not directory.is_dir():
                 continue
-            for video in directory.glob("*/video.mp4"):
+            videos = list(directory.glob("*/video.mp4"))
+            for video in directory.glob("*/*/*/video.mp4"):
+                try:
+                    datetime.strptime(video.parent.parent.parent.name, "%Y-%m-%d")
+                    slot = video.parent.parent.name
+                    if slot not in {"즉시공개", "업로드없음"}:
+                        try:
+                            datetime.strptime(slot, "%H-%M")
+                        except ValueError:
+                            datetime.strptime(slot, "%H-%M-%S")
+                except ValueError:
+                    continue
+                videos.append(video)
+            for video in videos:
                 place_id = video.parent.name
                 if place_id.isdigit() and place_id not in self.places and video.is_file() and video.stat().st_size > 0:
                     created = datetime.fromtimestamp(video.stat().st_mtime).astimezone().isoformat()

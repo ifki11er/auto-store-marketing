@@ -22,6 +22,7 @@ from openai import OpenAI
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
 from marketing.channel_regions import CHANNEL_ORDER, channel_for_address, iter_region_place_iterators
 from marketing.completed_places import CompletedPlaces
+from marketing.no_photo_places import NoPhotoPlaces
 from marketing.token_usage import record_token_usage
 from marketing.upload_schedule import KOREA_TIME, UploadSchedule
 from marketing.youtube_upload import upload_video
@@ -544,6 +545,16 @@ def is_chain_place(place):
     return bool(category and name.startswith(category))
 
 
+def result_folder(output, place_id, publication, now):
+    if publication is None:
+        day, slot = now.astimezone(KOREA_TIME), "업로드없음"
+    else:
+        publish_at, immediate = publication
+        day = publish_at.astimezone(KOREA_TIME)
+        slot = "즉시공개" if immediate else day.strftime("%H-%M")
+    return output / day.strftime("%Y-%m-%d") / slot / place_id
+
+
 def main(argv=None, single=False):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db", type=Path, default=ROOT / "kakao_places_filtered.db")
@@ -559,6 +570,7 @@ def main(argv=None, single=False):
     if not os.environ.get("OPENAI_API_KEY"):
         parser.error("OPENAI_API_KEY 환경 변수가 필요합니다")
     history = CompletedPlaces(ROOT / "completed_places.json")
+    no_photo_places = NoPhotoPlaces(ROOT / "no_photo_places.json")
     history.import_videos((args.output, ROOT / "test" / "results"))
     upload_setting = os.environ.get("YOUTUBE_UPLOAD_ENABLED", "true").strip().lower()
     if not single and upload_setting not in {"true", "false"}:
@@ -620,11 +632,16 @@ def main(argv=None, single=False):
                     if history.contains(place_id) or any(path.is_file() and path.stat().st_size > 0 for path in completed_videos):
                         print(f"이미 영상이 완성된 가게: {place_id} 건너뜀", flush=True)
                         continue
+                    if no_photo_places.contains(place_id):
+                        print(f"사진 없음 이력: {place_id} {place['place_name']} 건너뜀", flush=True)
+                        continue
                     print(f"가게 처리: {place_id} {place['place_name']}", flush=True)
-                    folder = args.output / place_id
+                    started = datetime.now()
+                    folder = args.output / "작업중" / place_id / started.strftime("%Y%m%d_%H%M%S_%f")
                     try:
                         availability = place_availability(browser, place["place_url"])
                         if not availability[1]:
+                            no_photo_places.add(place_id, place)
                             print("사진 없음: 건너뜀", flush=True)
                             continue
                         reviews = reviews_for(browser, place["place_url"], availability)
@@ -644,6 +661,7 @@ def main(argv=None, single=False):
                             print(f"사진 수집 시간 초과: {place_id} 건너뜀 ({exc})", flush=True)
                             continue
                         if not photos:
+                            no_photo_places.add(place_id, place)
                             print("사진 없음: 건너뜀", flush=True)
                             continue
                         photo_folder = folder / "03_photos"
@@ -661,9 +679,21 @@ def main(argv=None, single=False):
                     raw_video = folder / "06_video_raw.mp4"
                     generate_video(args.comfy_url, selected_photos(result, photos), result["minimax_prompt"], raw_video, reference_audio)
                     add_subtitles(raw_video, folder / "video.mp4", result["15초_스크립트"], subtitle_name="06_subtitles.srt", place_name=place["place_name"])
+                    publication = schedule.next_publication(datetime.now(KOREA_TIME), allocated) if schedule else None
+                    destination = result_folder(args.output, place_id, publication, datetime.now(KOREA_TIME))
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    if destination.exists():
+                        raise FileExistsError(f"결과 폴더가 이미 있습니다. 생성된 결과는 {folder}에 보관했습니다: {destination}")
+                    staging_parent = folder.parent
+                    folder.rename(destination)
+                    for path in (staging_parent, staging_parent.parent):
+                        try:
+                            path.rmdir()
+                        except OSError:
+                            pass
+                    folder = destination
                     history.add(place_id, channel)
                     if schedule:
-                        publication = schedule.next_publication(datetime.now(KOREA_TIME), allocated)
                         if publication is None:
                             print(f"공개 기간 종료: {place_id} 영상은 생성되었으나 업로드하지 않았습니다", flush=True)
                             return
