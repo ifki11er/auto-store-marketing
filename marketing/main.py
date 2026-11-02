@@ -22,9 +22,10 @@ from openai import OpenAI
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
 from marketing.channel_regions import CHANNEL_ORDER, channel_for_address, iter_region_place_iterators
 from marketing.completed_places import CompletedPlaces
+from marketing.token_usage import record_token_usage
 from marketing.upload_schedule import KOREA_TIME, UploadSchedule
 from marketing.youtube_upload import upload_video
-from marketing.prompts import build_planning_prompt
+from marketing.prompts import build_planning_prompt, select_video_format
 
 ROOT = Path(__file__).resolve().parent.parent
 WORKFLOW = ROOT / "workflow" / "Deno_MiniMax_H3_R2V_Turbo_8plus2.json"
@@ -123,6 +124,7 @@ def reviews_for(browser, place_url, availability=None):
 
 
 def photos_for(browser, place_url, folder, limit, availability=None):
+    limit = min(limit, 10) if limit is not None else 10
     if availability is None:
         availability = place_availability(browser, place_url)
     if not availability[1]:
@@ -205,19 +207,39 @@ def output_text(response):
 
 
 def analyze(client, photos):
-    content = [{"type": "input_text", "text": "각 사진을 입력 순서대로 한국어로 분석하세요. 보이는 음식, 공간, 분위기와 영상에 활용할 특징을 적고, 글자가 보이는지와 대략적인 위치 및 눈에 띄는 정도도 알려주세요. 보이지 않거나 읽을 수 없는 내용은 추측하지 마세요."}]
+    content = [{"type": "input_text", "text": "사진을 한국어로 분석해 JSON 객체만 반환하세요. 가게_전체_특징은 사진 전체에서 확인되는 가게의 특징을 간결히 요약한 문자열 배열입니다. 사진별_정보는 입력 순서대로 각 사진의 파일명과 보이는 음식·공간·특징을 간결히 설명한 배열입니다. 사진에 보이지 않는 내용은 추측하지 말고 영상 장면, 구도, 연출이나 스토리를 제안하지 마세요."}]
     for index, photo in enumerate(photos, 1):
         content.append({"type": "input_text", "text": f"사진 {index}: {photo.name}"})
         mime = mimetypes.guess_type(photo.name)[0]
         data = base64.b64encode(photo.read_bytes()).decode("ascii")
         content.append({"type": "input_image", "image_url": f"data:{mime};base64,{data}", "detail": "auto"})
-    return output_text(client.responses.create(model="gpt-6-luna", input=[{"role": "user", "content": content}]))
+    return output_text(client.responses.create(model="gpt-6-luna", input=[{"role": "user", "content": content}], text={"format": {"type": "json_object"}}))
 
 
-def plan(client, place, reviews, analysis, photos):
-    instruction = build_planning_prompt(place.get("category_group_code"))
+def plan(client, place, reviews, analysis, photos, prior_concepts=None):
+    video_format = select_video_format()
+    if os.environ.get("VIDEO_FORMAT", "").strip().lower() == "random":
+        print(f"랜덤 선택 포맷: {video_format}", flush=True)
+    instruction = build_planning_prompt(place.get("category_group_code"), video_format=video_format)
+    try:
+        photo_analysis = json.loads(analysis)
+    except (TypeError, ValueError):
+        photo_analysis = None
+    if isinstance(photo_analysis, dict) and "가게_전체_특징" in photo_analysis and "사진별_정보" in photo_analysis:
+        features = photo_analysis["가게_전체_특징"]
+        details = photo_analysis["사진별_정보"]
+    else:
+        features = "별도 요약 없음. 기존 사진 분석 내용을 참고하세요."
+        details = analysis
     payload = {"오늘": datetime.now().astimezone().date().isoformat(), "가게": place, "후기": reviews,
-               "사진_분석": analysis, "사진_목록": [{"분석_순번": i, "파일명": photo.name} for i, photo in enumerate(photos, 1)], "MiniMax_가이드": GUIDE.read_text(encoding="utf-8-sig")}
+               "가게_전체_특징": features}
+    if prior_concepts is not None:
+        instruction += "\n비교 테스트를 위해 결과 JSON의 중복_비교_요약에 이 기획의 핵심 상황과 전개만 80자 이내로 작성한다. 가게 특징, 포맷명, 기획 의도나 평가를 반복하지 않는다."
+        if prior_concepts:
+            payload["이전에_기획한_콘셉트"] = prior_concepts
+    payload.update({"사진_선택용_상세정보": details,
+                    "사진_목록": [{"분석_순번": i, "파일명": photo.name} for i, photo in enumerate(photos, 1)],
+                    "MiniMax_가이드": GUIDE.read_text(encoding="utf-8-sig")})
     base_input = "다음 자료를 바탕으로 JSON 객체를 작성하세요.\n" + json.dumps(payload, ensure_ascii=False)
     error = None
     last_result = None
@@ -225,7 +247,7 @@ def plan(client, place, reviews, analysis, photos):
         retry_input = base_input
         if error is not None:
             retry_input += "\n이전 결과가 다음 검증에 실패했습니다. 해당 문제를 고쳐 전체 JSON을 다시 작성하세요: " + str(error)
-        response = client.responses.create(model="gpt-6.1-terra", instructions=instruction,
+        response = client.responses.create(model="gpt-6-luna", instructions=instruction,
             input=retry_input, text={"format": {"type": "json_object"}})
         try:
             result = json.loads(output_text(response))
@@ -242,6 +264,12 @@ def plan(client, place, reviews, analysis, photos):
             raise ValueError("세 번의 기획 응답 모두 사용할 수 있는 JSON 객체가 아닙니다") from error
         print("기획 검증에 세 번 실패하여 마지막으로 받은 JSON 객체를 그대로 사용합니다.", flush=True)
         result = last_result
+    shots = result.get("15초_스크립트")
+    if os.environ.get("VIDEO_FORMAT", "").strip().lower() == "random":
+        result["랜덤_선택_포맷"] = video_format
+    for shot in shots if isinstance(shots, list) else []:
+        if isinstance(shot, dict):
+            shot.pop("자막_스타일", None)
     result["분석_사진_목록"] = photo_manifest(photos)
     return result
 
@@ -262,13 +290,23 @@ def validate_plan(result, photos):
             raise ValueError("스크립트 시간이 연속적이지 않습니다")
         if not isinstance(shot.get("자막"), str):
             raise ValueError("자막은 문자열이어야 합니다. 자막이 없으면 빈 문자열을 사용하세요")
-        validate_subtitle_style(shot)
         narration = shot.get("내레이션")
         if not isinstance(narration, str) or re.search(r"[0-9]", narration):
             raise ValueError("대사는 문자열이어야 하며 숫자는 실제 읽는 한글 발음으로 작성해야 합니다")
+        if shot.get("발화_유형") not in ("나레이션", "화면발화", "없음"):
+            raise ValueError("각 장면의 발화_유형은 나레이션, 화면발화, 없음 중 하나여야 합니다")
+        if bool(narration.strip()) != (shot["발화_유형"] != "없음"):
+            raise ValueError("발화 유형과 대사 유무가 일치하지 않습니다")
+        if shot["발화_유형"] == "나레이션":
+            count = len(re.findall(r"[가-힣]", narration))
+            required = count * 4 / 25
+            if stop - start + 1e-9 < required:
+                raise ValueError(f"나레이션 한글 {count}자에는 약 {required:.2f}초가 필요하지만 장면은 {stop - start:.2f}초입니다")
         end = stop
     if end != 15:
         raise ValueError("스크립트가 15초가 아닙니다")
+    if {"나레이션", "화면발화"} <= {shot["발화_유형"] for shot in shots}:
+        raise ValueError("한 영상에서 나레이션과 화면발화를 함께 사용할 수 없습니다")
     voices = result.get("음성_연출")
     if not isinstance(voices, list):
         raise ValueError("음성_연출은 배열이어야 합니다")
@@ -281,9 +319,18 @@ def validate_plan(result, photos):
         if voice["화자_ID"] in voice_ids:
             raise ValueError("음성 연출의 화자_ID가 중복되었습니다")
         voice_ids.add(voice["화자_ID"])
+    voices_by_id = {voice["화자_ID"]: voice for voice in voices}
+    for shot in shots:
+        if shot["발화_유형"] == "없음":
+            continue
+        voice = voices_by_id.get(shot.get("화자_ID"))
+        if voice is None:
+            raise ValueError("대사가 있는 장면에 음성_연출의 화자_ID가 필요합니다")
     dialogue = re.findall(r"<d>((?:(?!<d>|</d>).)*)</d>", result["minimax_prompt"], flags=re.DOTALL)
     if [text.strip() for text in dialogue] != [shot["내레이션"].strip() for shot in shots if shot["내레이션"].strip()]:
         raise ValueError("영상 프롬프트의 대사가 스크립트 대사와 순서대로 일치하지 않습니다")
+    if any(shot["발화_유형"] == "나레이션" for shot in shots) and "<Audio 1>" not in result["minimax_prompt"]:
+        raise ValueError("나레이션 프롬프트에 <Audio 1> 목소리 참조가 없습니다")
     selected = result.get("선택_사진")
     available = {photo.name for photo in photos}
     if not isinstance(selected, list) or not 1 <= len(selected) <= 9:
@@ -297,27 +344,6 @@ def validate_plan(result, photos):
         if f"<Picture {index}>" not in result["minimax_prompt"]:
             raise ValueError(f"영상 프롬프트에 <Picture {index}> 참조가 없습니다")
         names.append(item["파일명"])
-
-
-SUBTITLE_ALIGNMENTS = {"하단왼쪽": 1, "하단중앙": 2, "하단오른쪽": 3,
-                       "중앙왼쪽": 4, "중앙": 5, "중앙오른쪽": 6,
-                       "상단왼쪽": 7, "상단중앙": 8, "상단오른쪽": 9}
-
-
-def validate_subtitle_style(shot):
-    text = shot.get("자막")
-    if not isinstance(text, str):
-        raise ValueError("자막은 문자열이어야 합니다")
-    if not text.strip():
-        return
-    style = shot.get("자막_스타일")
-    if not isinstance(style, dict) or style.get("위치") not in SUBTITLE_ALIGNMENTS:
-        raise ValueError("자막 위치가 올바르지 않습니다. 5번 기획을 다시 실행하세요")
-    size = style.get("크기")
-    if type(size) is not int or not 40 <= size <= 90:
-        raise ValueError("자막 크기는 40~90 사이의 정수여야 합니다")
-    if not isinstance(style.get("색상"), str) or not re.fullmatch(r"#[0-9a-fA-F]{6}", style["색상"]):
-        raise ValueError("자막 색상은 #RRGGBB 형식이어야 합니다")
 
 
 def photo_manifest(photos):
@@ -335,7 +361,24 @@ def selected_photos(result, photos):
     return [available[name] for name in names]
 
 
-def generate_video(base, photos, prompt, output):
+def narration_reference(shots):
+    kinds = {shot.get("발화_유형") for shot in shots}
+    if not kinds <= {"나레이션", "화면발화", "없음"}:
+        raise ValueError("발화 유형을 확인할 수 없습니다. 5번 기획을 다시 생성하세요")
+    if {"나레이션", "화면발화"} <= kinds:
+        raise ValueError("한 영상에서 나레이션과 화면발화를 함께 사용할 수 없습니다")
+    if "나레이션" not in kinds:
+        return None
+    filename = os.environ.get("MINIMAX_REFERENCE_VOICE", "").strip()
+    if not filename:
+        raise ValueError(".env의 MINIMAX_REFERENCE_VOICE에 참조 WAV 파일명을 입력하세요")
+    path = ROOT / "res" / filename
+    if not path.is_file():
+        raise FileNotFoundError(f"MiniMax 참조 음성 파일이 없습니다: {path}")
+    return path
+
+
+def generate_video(base, photos, prompt, output, reference_audio=None):
     if not 1 <= len(photos) <= 9:
         raise ValueError("ComfyUI에 전달할 사진은 1~9장이어야 합니다")
     base = base.rstrip("/")
@@ -354,6 +397,16 @@ def generate_video(base, photos, prompt, output):
         node_id = str(9000 + index)
         workflow[node_id] = {"class_type": "LoadImage", "inputs": {"image": name}}
         inputs[f"ref_images.ref_image_{index}"] = [node_id, 0]
+    if reference_audio is not None:
+        with reference_audio.open("rb") as audio:
+            response = requests.post(base + "/upload/image", files={"image": (reference_audio.name, audio, "audio/wav")},
+                                     data={"overwrite": "false", "type": "input"}, timeout=60)
+        response.raise_for_status()
+        uploaded = response.json()
+        name = "/".join(filter(None, (uploaded.get("subfolder"), uploaded["name"])))
+        node_id = str(9000 + len(photos))
+        workflow[node_id] = {"class_type": "LoadAudio", "inputs": {"audio": name}}
+        inputs["ref_audios.ref_audio_0"] = [node_id, 0]
     workflow["186"]["inputs"]["text"] = prompt
     workflow["132"]["inputs"]["value"] = 15
     # Submit only nodes reachable from the video output, removing sample assets.
@@ -393,7 +446,7 @@ def generate_video(base, photos, prompt, output):
     raise TimeoutError(f"ComfyUI 작업 대기 시간 초과: {prompt_id}")
 
 
-def add_subtitles(raw_video, output, shots, subtitle_name="subtitles.srt"):
+def add_subtitles(raw_video, output, shots, subtitle_name="subtitles.srt", place_name=""):
     """기획 자막을 SRT와 ASS로 저장하고 장면별 스타일을 합성한다."""
     def timestamp(seconds, ass=False):
         units = round(float(seconds) * (100 if ass else 1000))
@@ -406,23 +459,22 @@ def add_subtitles(raw_video, output, shots, subtitle_name="subtitles.srt"):
 
     entries = []
     events = []
+    if place_name.strip():
+        title = place_name.strip().replace("\\", "＼").replace("{", "｛").replace("}", "｝").replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
+        events.append(f"Dialogue: 0,{timestamp(0, True)},{timestamp(shots[-1]['종료초'], True)},Default,,0,0,0,,{{\\an8\\fs90\\c&HFFFFFF&}}{title}")
     for shot in shots:
-        validate_subtitle_style(shot)
         text = shot["자막"].strip()
         if not text:
             continue
         start, end = shot["시작초"], shot["종료초"]
         entries.append(f"{len(entries) + 1}\n{timestamp(start)} --> {timestamp(end)}\n{text}\n")
-        style = shot["자막_스타일"]
-        color = style["색상"][1:]
-        bgr = color[4:6] + color[2:4] + color[0:2]
         text = text.replace("\\", "＼").replace("{", "｛").replace("}", "｝").replace("\r\n", "\n").replace("\n", r"\N")
-        tags = rf"{{\an{SUBTITLE_ALIGNMENTS[style['위치']]}\fs{style['크기']}\c&H{bgr}&}}"
+        tags = r"{\an5\fs54\c&HFFFFFF&}"
         events.append(f"Dialogue: 0,{timestamp(start, True)},{timestamp(end, True)},Default,,0,0,0,,{tags}{text}")
     subtitles = output.parent / subtitle_name
     subtitles.write_text("\n".join(entries), encoding="utf-8-sig")
     ass_file = subtitles.with_suffix(".ass")
-    if entries:
+    if events:
         ass_file.write_text("""[Script Info]
 ScriptType: v4.00+
 PlayResX: 1080
@@ -444,7 +496,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     if not watermark.is_file():
         raise FileNotFoundError(f"워터마크 파일이 없습니다: {watermark}")
     with tempfile.TemporaryDirectory(dir=output.parent.resolve()) as temp_dir:
-        if entries:
+        if events:
             font = ROOT / "font" / "Jua-Regular.ttf"
             if not font.is_file():
                 raise FileNotFoundError(f"자막 폰트 파일이 없습니다: {font}")
@@ -471,13 +523,16 @@ def recorded_client(client, folder, stage, number):
     def create(**kwargs):
         nonlocal attempts
         attempts += 1
-        write_json(folder / f"{number}_gpt_{stage}_request.json", kwargs)
         if stage == "plan":
             write_json(folder / f"{number}_gpt_{stage}_request_{attempts}.json", kwargs)
+        else:
+            write_json(folder / f"{number}_gpt_{stage}_request.json", kwargs)
         response = client.responses.create(**kwargs)
-        write_json(folder / f"{number}_gpt_{stage}_response.json", response.model_dump(mode="json"))
+        record_token_usage(folder, stage, response)
         if stage == "plan":
             write_json(folder / f"{number}_gpt_{stage}_response_{attempts}.json", response.model_dump(mode="json"))
+        else:
+            write_json(folder / f"{number}_gpt_{stage}_response.json", response.model_dump(mode="json"))
         return response
 
     return SimpleNamespace(responses=SimpleNamespace(create=create))
@@ -494,10 +549,11 @@ def main(argv=None, single=False):
     parser.add_argument("--db", type=Path, default=ROOT / "kakao_places_filtered.db")
     parser.add_argument("--place-id", help="특정 가게만 처리")
     parser.add_argument("--after-id", default="", help="이 ID 다음부터 검색")
-    parser.add_argument("--max-photos", type=int, default=None, help="다운로드할 최대 사진 수 (기본값: 제한 없음)")
+    parser.add_argument("--max-photos", type=int, default=10, help="다운로드할 최대 사진 수 (최대 10장)")
     parser.add_argument("--comfy-url", default="http://127.0.0.1:8188")
     parser.add_argument("--output", type=Path, default=ROOT / "output")
     args = parser.parse_args(argv)
+    build_planning_prompt(None)  # 영상 생성 전에 포맷 설정을 확인한다.
     if args.max_photos is not None and args.max_photos < 1:
         parser.error("--max-photos는 1 이상이어야 합니다")
     if not os.environ.get("OPENAI_API_KEY"):
@@ -601,9 +657,10 @@ def main(argv=None, single=False):
                     result = plan(recorded_client(client, folder, "plan", "05"), place, reviews, analysis, photos)
                     write_json(folder / "05_plan.json", result)
                     write_json(folder / "05_marketing.json", {"가게": place, "후기": reviews, "사진_분석": analysis, "기획": result})
+                    reference_audio = narration_reference(result["15초_스크립트"])
                     raw_video = folder / "06_video_raw.mp4"
-                    generate_video(args.comfy_url, selected_photos(result, photos), result["minimax_prompt"], raw_video)
-                    add_subtitles(raw_video, folder / "video.mp4", result["15초_스크립트"], subtitle_name="06_subtitles.srt")
+                    generate_video(args.comfy_url, selected_photos(result, photos), result["minimax_prompt"], raw_video, reference_audio)
+                    add_subtitles(raw_video, folder / "video.mp4", result["15초_스크립트"], subtitle_name="06_subtitles.srt", place_name=place["place_name"])
                     history.add(place_id, channel)
                     if schedule:
                         publication = schedule.next_publication(datetime.now(KOREA_TIME), allocated)

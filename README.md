@@ -17,7 +17,7 @@ python -m playwright install chromium
 
 `.env`의 `YOUTUBE_UPLOAD_ENABLED=true`이면 영상 생성 후 유튜브에 업로드하고, `false`이면 업로드 없이 다음 가게로 넘어갑니다. 업로드를 끄면 예약 날짜와 인증 파일은 필요하지 않습니다. 예약 설정은 `.env`의 `YOUTUBE_START_DATE`와 `YOUTUBE_END_DATE`(YYYY-MM-DD, 양쪽 날짜 포함), `YOUTUBE_DAILY_UPLOAD_COUNT`, `YOUTUBE_PUBLISH_TIMES`(한국 시간, 쉼표 구분)에 입력합니다. 공개 시간의 개수는 하루 업로드 개수와 일치해야 합니다. `test/08_upload_schedule.py`는 실제 업로드 없이 일정만 계산합니다. 업로드를 켜면 `res/강원.pickle`처럼 10개 지역별 Google OAuth Credentials 객체를 저장한 pickle 파일이 필요하며, 인증에는 YouTube 업로드 권한이 포함되어야 합니다.
 
-OpenAI 계정에 `gpt-6-luna`, `gpt-6.1-terra` API 접근 권한이 필요합니다. 실행 중인 ComfyUI의 API와 제공된 워크플로에서 지정한 모델, LoRA 및 커스텀 노드가 필요합니다. 특히 `DenoPromptText`, `DenoTextEncoderUnload`, `VHS_VideoCombine` 등 워크플로의 모든 활성 노드가 설치되어 있어야 합니다. 워크플로의 기본 해상도와 영상 설정을 사용하며 참조 사진만 교체합니다. 시작 전 원본 사진과 후기의 광고 활용 권한을 확인하세요.
+OpenAI 계정에 `gpt-6-luna` API 접근 권한이 필요합니다. 실행 중인 ComfyUI의 API와 제공된 워크플로에서 지정한 모델, LoRA 및 커스텀 노드가 필요합니다. 특히 `DenoPromptText`, `DenoTextEncoderUnload`, `VHS_VideoCombine` 등 워크플로의 모든 활성 노드가 설치되어 있어야 합니다. 워크플로의 기본 해상도와 영상 설정을 사용하며 참조 사진만 교체합니다. 시작 전 원본 사진과 후기의 광고 활용 권한을 확인하세요.
 
 ## 실행
 
@@ -37,3 +37,5 @@ python main.py --after-id 12263892 --max-photos 3 --comfy-url http://127.0.0.1:8
 카카오 원본 장소 페이지의 기본 탭을 확인해 사진 탭이 없으면 해당 가게를 건너뜁니다. 사진 탭이 있으면 후기가 있을 때만 `#review`에서 수집하고, `#photoview`에서 사진을 수집한 뒤 GPT를 호출합니다. 이 판단은 카카오 페이지 구조와 이미지 주소 형식에 의존하므로 페이지가 바뀌거나 접근이 제한되면 수정이 필요할 수 있습니다. MiniMax 프롬프트 요약은 `docs/MINIMAX_H3_SUMMARY.md`에 있으며 원문은 `docs/VIDEO_PROMPT_WRITING_GUIDE_ref_en.md`입니다. 15초 스크립트 시간은 검증하지만 영상의 실제 길이는 워크플로와 ComfyUI 노드의 출력에 따라 확인해야 합니다.
 
 영상 기획의 공통 지시는 `marketing/prompts/common.md`에 있고, 업종별 지시는 같은 폴더의 코드별 파일에 있습니다. `marketing/prompts.py`에서 업종 코드와 지시 파일을 연결하며, 등록되지 않은 코드는 공통 지시만 사용합니다.
+
+나레이션 영상은 `.env`의 `MINIMAX_REFERENCE_VOICE`에 지정한 `res` 폴더의 WAV를 MiniMax 음색 참조로 전달합니다. 나레이션·음악·효과음은 MiniMax가 생성하며, 별도 TTS나 FFmpeg 음성 합성은 사용하지 않습니다. 화면 속 발화 영상은 참조 WAV 없이 MiniMax가 발화합니다. 한 영상에는 나레이션과 화면 속 발화를 섞지 않습니다. `test/11_minimax_voice_reference.py`로 참조 음성을 개별 테스트할 수 있습니다.
