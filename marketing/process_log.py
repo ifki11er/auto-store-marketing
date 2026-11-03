@@ -11,7 +11,8 @@ PROCESS_FILE = Path(__file__).resolve().parent.parent / "process.json"
 
 def record_process(place, video_path, publish_at=None, uploaded=False, generated_at=None):
     path = PROCESS_FILE
-    items = json.loads(path.read_text(encoding="utf-8-sig")) if path.exists() else []
+    content = path.read_text(encoding="utf-8-sig") if path.exists() else ""
+    items = json.loads(content) if content.strip() else []
     if not isinstance(items, list):
         raise ValueError("process.json은 영상 목록이어야 합니다")
     video = str(Path(video_path).resolve())
