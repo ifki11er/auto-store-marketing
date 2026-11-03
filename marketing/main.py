@@ -9,6 +9,7 @@ import re
 import subprocess
 import shutil
 import tempfile
+from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
 import sqlite3
@@ -21,11 +22,11 @@ import requests
 from openai import OpenAI
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
 from marketing.channel_regions import CHANNEL_ORDER, channel_for_address, iter_region_place_iterators
-from marketing.completed_places import CompletedPlaces
-from marketing.no_photo_places import NoPhotoPlaces
+from marketing.place_history import PlaceHistory
+from marketing.output_schedule import folder_allocations
+from marketing.process_log import record_process
 from marketing.token_usage import record_token_usage
 from marketing.upload_schedule import KOREA_TIME, UploadSchedule
-from marketing.youtube_upload import upload_video
 from marketing.prompts import build_planning_prompt, select_video_format
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -208,7 +209,7 @@ def output_text(response):
 
 
 def analyze(client, photos):
-    content = [{"type": "input_text", "text": "사진을 한국어로 분석해 JSON 객체만 반환하세요. 가게_전체_특징은 사진 전체에서 확인되는 가게의 특징을 간결히 요약한 문자열 배열입니다. 사진별_정보는 입력 순서대로 각 사진의 파일명과 보이는 음식·공간·특징을 간결히 설명한 배열입니다. 사진에 보이지 않는 내용은 추측하지 말고 영상 장면, 구도, 연출이나 스토리를 제안하지 마세요."}]
+    content = [{"type": "input_text", "text": "사진을 한국어로 분석해 JSON 객체만 반환하세요. 가게_전체_특징은 사진 전체에서 확인되는 가게의 특징을 간결히 요약한 문자열 배열입니다. 사진별_정보는 입력 순서대로 모든 사진마다 파일명(문자열), 설명(문자열), 참조_사용_가능(JSON 불리언)을 가진 객체 배열입니다. 메뉴판, 가격표, 전단, 팸플릿, 안내문 등 글자가 주된 내용이거나 글자가 많이 포함된 사진은 참조_사용_가능을 false로 지정하세요. 그 외의 사진은 true로 지정하세요. 작은 간판이나 라벨이 일부 보이는 정도는 글자가 주된 내용이 아니라면 허용합니다. 사진에 보이지 않는 내용은 추측하지 말고 영상 장면, 구도, 연출이나 스토리를 제안하지 마세요."}]
     for index, photo in enumerate(photos, 1):
         content.append({"type": "input_text", "text": f"사진 {index}: {photo.name}"})
         mime = mimetypes.guess_type(photo.name)[0]
@@ -217,21 +218,43 @@ def analyze(client, photos):
     return output_text(client.responses.create(model="gpt-6-luna", input=[{"role": "user", "content": content}], text={"format": {"type": "json_object"}}))
 
 
+class NoUsableReferencePhotos(ValueError):
+    """글자가 많은 사진을 제외하고 사용할 참조 사진이 없다."""
+
+
+class PhotoAnalysisError(ValueError):
+    """사진 분석 응답의 판별 결과를 확인할 수 없다."""
+
+
+def reference_photo_candidates(analysis, photos):
+    try:
+        data = json.loads(analysis)
+        details = data["사진별_정보"]
+        if not isinstance(details, list):
+            raise ValueError
+        labels = {}
+        for item in details:
+            if not isinstance(item, dict) or not isinstance(item.get("파일명"), str) or type(item.get("참조_사용_가능")) is not bool or item["파일명"] in labels:
+                raise ValueError
+            labels[item["파일명"]] = item["참조_사용_가능"]
+        if set(labels) != {photo.name for photo in photos}:
+            raise ValueError
+    except (TypeError, ValueError, KeyError) as exc:
+        raise PhotoAnalysisError("사진별 글자 판별 결과가 없거나 올바르지 않습니다. 사진 분석을 다시 실행하세요") from exc
+    eligible = [photo for photo in photos if labels[photo.name]]
+    if not eligible:
+        raise NoUsableReferencePhotos("글자가 많은 사진을 제외하면 사용할 참조 사진이 없습니다")
+    return data, eligible
+
+
 def plan(client, place, reviews, analysis, photos, prior_concepts=None):
     video_format = select_video_format()
     if os.environ.get("VIDEO_FORMAT", "").strip().lower() == "random":
         print(f"랜덤 선택 포맷: {video_format}", flush=True)
     instruction = build_planning_prompt(place.get("category_group_code"), video_format=video_format)
-    try:
-        photo_analysis = json.loads(analysis)
-    except (TypeError, ValueError):
-        photo_analysis = None
-    if isinstance(photo_analysis, dict) and "가게_전체_특징" in photo_analysis and "사진별_정보" in photo_analysis:
-        features = photo_analysis["가게_전체_특징"]
-        details = photo_analysis["사진별_정보"]
-    else:
-        features = "별도 요약 없음. 기존 사진 분석 내용을 참고하세요."
-        details = analysis
+    photo_analysis, eligible_photos = reference_photo_candidates(analysis, photos)
+    features = photo_analysis.get("가게_전체_특징", [])
+    details = [item for item in photo_analysis["사진별_정보"] if item["참조_사용_가능"]]
     payload = {"오늘": datetime.now().astimezone().date().isoformat(), "가게": place, "후기": reviews,
                "가게_전체_특징": features}
     if prior_concepts is not None:
@@ -239,7 +262,7 @@ def plan(client, place, reviews, analysis, photos, prior_concepts=None):
         if prior_concepts:
             payload["이전에_기획한_콘셉트"] = prior_concepts
     payload.update({"사진_선택용_상세정보": details,
-                    "사진_목록": [{"분석_순번": i, "파일명": photo.name} for i, photo in enumerate(photos, 1)],
+                    "사진_목록": [{"분석_순번": i, "파일명": photo.name} for i, photo in enumerate(eligible_photos, 1)],
                     "MiniMax_가이드": GUIDE.read_text(encoding="utf-8-sig")})
     base_input = "다음 자료를 바탕으로 JSON 객체를 작성하세요.\n" + json.dumps(payload, ensure_ascii=False)
     error = None
@@ -255,7 +278,7 @@ def plan(client, place, reviews, analysis, photos, prior_concepts=None):
             if not isinstance(result, dict):
                 raise ValueError("기획 결과는 JSON 객체여야 합니다")
             last_result = result
-            validate_plan(result, photos)
+            validate_plan(result, eligible_photos)
             break
         except (ValueError, KeyError, TypeError) as exc:
             error = exc
@@ -272,6 +295,8 @@ def plan(client, place, reviews, analysis, photos, prior_concepts=None):
         if isinstance(shot, dict):
             shot.pop("자막_스타일", None)
     result["분석_사진_목록"] = photo_manifest(photos)
+    result["참조_가능_사진"] = [photo.name for photo in eligible_photos]
+    selected_photos(result, photos)
     return result
 
 
@@ -353,12 +378,15 @@ def photo_manifest(photos):
 
 def selected_photos(result, photos):
     available = {p.name: p for p in photos}
+    eligible = result.get("참조_가능_사진")
+    if not isinstance(eligible, list) or not all(isinstance(name, str) for name in eligible):
+        raise ValueError("참조 가능한 사진 정보가 없습니다. 4번 사진 분석과 5번 기획을 다시 실행하세요")
     selected = result.get("선택_사진")
     if not isinstance(selected, list) or not 1 <= len(selected) <= 9:
         raise ValueError("기획의 선택 사진은 1~9장이어야 합니다. 5번 테스트를 다시 실행하세요")
     names = [item.get("파일명") if isinstance(item, dict) else None for item in selected]
-    if len(set(names)) != len(names) or any(name not in available for name in names):
-        raise ValueError("기획에 지정된 사진이 없거나 중복되었습니다")
+    if len(set(names)) != len(names) or any(name not in available or name not in eligible for name in names):
+        raise ValueError("기획에 지정된 사진이 없거나 중복되었거나 참조할 수 없는 사진입니다")
     return [available[name] for name in names]
 
 
@@ -542,28 +570,14 @@ def is_chain_place(place):
 
 def result_folder(output, place_id, publication, now):
     if publication is None:
-        day, slot = now.astimezone(KOREA_TIME), "업로드없음"
-    else:
-        publish_at, _ = publication
-        day = publish_at.astimezone(KOREA_TIME)
-        slot = day.strftime("%H%M")
+        raise ValueError("공개 예정 시간을 배정할 수 없습니다")
+    publish_at, _ = publication
+    day = publish_at.astimezone(KOREA_TIME)
+    slot = day.strftime("%H%M")
     return output / day.strftime("%Y-%m-%d") / slot / place_id
 
 
-def allocated_publications(history, channel):
-    allocated = []
-    for entry in history.places.values():
-        if entry.get("지역") != channel:
-            continue
-        value = entry.get("업로드_시간") or entry.get("예정_공개_시간")
-        if value:
-            allocated.append(datetime.fromisoformat(value))
-    return allocated
-
-
-def next_result_publication(schedule, upload_enabled, allocated):
-    if upload_enabled:
-        return schedule.next_publication(datetime.now(KOREA_TIME), allocated)
+def next_result_publication(schedule, allocated):
     planned = schedule.next_planned_publication(allocated)
     return (planned, False) if planned is not None else None
 
@@ -582,41 +596,28 @@ def main(argv=None, single=False):
         parser.error("--max-photos는 1 이상이어야 합니다")
     if not os.environ.get("OPENAI_API_KEY"):
         parser.error("OPENAI_API_KEY 환경 변수가 필요합니다")
-    history = CompletedPlaces(ROOT / "completed_places.json")
-    no_photo_places = NoPhotoPlaces(ROOT / "no_photo_places.json")
-    history.import_videos((args.output, ROOT / "test" / "results"))
-    upload_setting = os.environ.get("YOUTUBE_UPLOAD_ENABLED", "true").strip().lower()
-    if not single and upload_setting not in {"true", "false"}:
-        raise ValueError("YOUTUBE_UPLOAD_ENABLED는 true 또는 false로 설정하세요")
-    upload_enabled = not single and upload_setting == "true"
+    history = PlaceHistory(args.db)
     schedule = UploadSchedule.from_environment(os.environ)
-    if not single:
-        print(f"유튜브 업로드: {'사용' if upload_enabled else '사용 안 함'}", flush=True)
-    if upload_enabled:
-        missing = [channel for channel in CHANNEL_ORDER if not (ROOT / "res" / f"{channel}.pickle").is_file()]
-        if missing:
-            raise ValueError("유튜브 인증 파일이 없습니다: " + ", ".join(missing))
-        if any(entry.get("업로드_상태") == "진행중" for entry in history.places.values()):
-            raise ValueError("업로드 결과가 확인되지 않은 이력이 있습니다. 유튜브에서 확인한 뒤 completed_places.json을 수정하세요")
+    allocations = folder_allocations(args.output, schedule)
     client = OpenAI()
-    uri = args.db.resolve().as_uri() + "?mode=ro"
-    with sqlite3.connect(uri, uri=True) as db, sync_playwright() as playwright:
-        db.row_factory = sqlite3.Row
+    with closing(history.db) as db, db, sync_playwright() as playwright:
         if args.place_id:
-            groups = (iter(db.execute("SELECT * FROM places WHERE place_id = ?", (args.place_id,))),)
+            groups = (iter(db.execute("SELECT * FROM places WHERE place_id = ? AND generated_at IS NULL AND (upload_status IS NULL OR upload_status != '완료') AND (posible IS NULL OR posible = '')", (args.place_id,))),)
         else:
             groups = iter_region_place_iterators(db, args.after_id)
         browser = playwright.chromium.launch(headless=True)
         try:
             completed = 0
             for rows in groups:
-                if schedule and all(next_result_publication(schedule, upload_enabled,
-                    allocated_publications(history, channel)) is None
+                if schedule and all(next_result_publication(schedule,
+                    allocations[channel]) is None
                     for channel in CHANNEL_ORDER):
                     print("모든 지역의 공개 기간 일정이 완료되었습니다", flush=True)
                     break
                 for row in rows:
                     place = dict(row)
+                    for key in ("generated_at", "publish_at", "channel", "posible", "upload_status", "youtube_video_id"):
+                        place.pop(key, None)
                     place_id = str(place["place_id"])
                     if place.get("category_group_code") in {"MT1", "PS3", "SC4", "OL7", "PO3", "AG2", "BK9", "CS2", "HP8", "PK6", "PM9", "SW8"}:
                         print(f"제외 업종: {place_id} ({place['category_group_code']}) 건너뜀", flush=True)
@@ -636,15 +637,12 @@ def main(argv=None, single=False):
                         if not channel:
                             print(f"지역 채널 없음: {place_id} 건너뜀", flush=True)
                             continue
-                        allocated = allocated_publications(history, channel)
-                        if next_result_publication(schedule, upload_enabled, allocated) is None:
+                        allocated = allocations[channel]
+                        if next_result_publication(schedule, allocated) is None:
                             break
                     completed_videos = (args.output / place_id / "video.mp4", ROOT / "test" / "results" / place_id / "video.mp4")
                     if history.contains(place_id) or any(path.is_file() and path.stat().st_size > 0 for path in completed_videos):
                         print(f"이미 영상이 완성된 가게: {place_id} 건너뜀", flush=True)
-                        continue
-                    if no_photo_places.contains(place_id):
-                        print(f"사진 없음 이력: {place_id} {place['place_name']} 건너뜀", flush=True)
                         continue
                     print(f"가게 처리: {place_id} {place['place_name']}", flush=True)
                     started = datetime.now()
@@ -652,7 +650,7 @@ def main(argv=None, single=False):
                     try:
                         availability = place_availability(browser, place["place_url"])
                         if not availability[1]:
-                            no_photo_places.add(place_id, place)
+                            history.set_failure(place_id, "no photo")
                             print("사진 없음: 건너뜀", flush=True)
                             continue
                         reviews = reviews_for(browser, place["place_url"], availability)
@@ -672,7 +670,7 @@ def main(argv=None, single=False):
                             print(f"사진 수집 시간 초과: {place_id} 건너뜀 ({exc})", flush=True)
                             continue
                         if not photos:
-                            no_photo_places.add(place_id, place)
+                            history.set_failure(place_id, "no photo")
                             print("사진 없음: 건너뜀", flush=True)
                             continue
                         photo_folder = folder / "03_photos"
@@ -683,14 +681,22 @@ def main(argv=None, single=False):
                     write_json(folder / "04_analysis_photos.json", photo_manifest(photos))
                     analysis = analyze(recorded_client(client, folder, "analysis", "04"), photos)
                     (folder / "04_analysis.txt").write_text(analysis, encoding="utf-8")
-                    result = plan(recorded_client(client, folder, "plan", "05"), place, reviews, analysis, photos)
+                    try:
+                        result = plan(recorded_client(client, folder, "plan", "05"), place, reviews, analysis, photos)
+                    except NoUsableReferencePhotos as exc:
+                        history.set_failure(place_id, "too much text")
+                        print(f"사용할 수 있는 참조 사진 없음: {place_id} 건너뜀 ({exc})", flush=True)
+                        continue
+                    except PhotoAnalysisError as exc:
+                        print(f"사진 분석 결과 오류: {place_id} 건너뜀 ({exc})", flush=True)
+                        continue
                     write_json(folder / "05_plan.json", result)
                     write_json(folder / "05_marketing.json", {"가게": place, "후기": reviews, "사진_분석": analysis, "기획": result})
                     reference_audio = narration_reference(result["15초_스크립트"])
                     raw_video = folder / "06_video_raw.mp4"
                     generate_video(args.comfy_url, selected_photos(result, photos), result["minimax_prompt"], raw_video, reference_audio)
                     add_subtitles(raw_video, folder / "video.mp4", result["15초_스크립트"], subtitle_name="06_subtitles.srt", place_name=place["place_name"])
-                    publication = next_result_publication(schedule, upload_enabled, allocated) if schedule else None
+                    publication = next_result_publication(schedule, allocated) if schedule else None
                     destination = result_folder(args.output, place_id, publication, datetime.now(KOREA_TIME))
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     if destination.exists():
@@ -703,16 +709,10 @@ def main(argv=None, single=False):
                         except OSError:
                             pass
                     folder = destination
-                    history.add(place_id, channel, publication[0] if schedule and not upload_enabled and publication else None)
-                    if upload_enabled:
-                        if publication is None:
-                            print(f"공개 기간 종료: {place_id} 영상은 생성되었으나 업로드하지 않았습니다", flush=True)
-                            return
-                        publish_at, immediate = publication
-                        history.set_upload(place_id, publish_at, "진행중")
-                        video_id = upload_video(ROOT / "res" / f"{channel}.pickle", folder / "video.mp4", result, publish_at, immediate, place.get("place_name"))
-                        history.set_upload(place_id, publish_at, "완료", video_id)
-                        print(f"유튜브 업로드 완료: {channel} {publish_at.isoformat()} ({video_id})", flush=True)
+                    history.add(place_id, channel, publication[0] if publication else None)
+                    if publication:
+                        allocations[channel].append(publication[0])
+                    record_process(place, folder / "video.mp4", publication[0] if publication else None)
                     print(f"완료: {folder}", flush=True)
                     completed += 1
                     if single:

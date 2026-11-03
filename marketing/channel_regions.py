@@ -35,7 +35,7 @@ def iter_region_place_iterators(db, after_id=""):
     for channel in CHANNEL_ORDER:
         aliases = [name for name, target in REGION_CHANNELS.items() if target == channel]
         placeholders = ",".join("?" for _ in aliases)
-        sql = f"SELECT * FROM places WHERE place_id > ? AND {region} IN ({placeholders}) ORDER BY place_id"
+        sql = f"SELECT * FROM places WHERE place_id > ? AND generated_at IS NULL AND (upload_status IS NULL OR upload_status != '완료') AND (posible IS NULL OR posible = '') AND {region} IN ({placeholders}) ORDER BY place_id"
         cursors.append(iter(db.execute(sql, (after_id, *aliases))))
     while cursors:
         active = []

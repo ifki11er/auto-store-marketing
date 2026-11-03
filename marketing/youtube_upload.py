@@ -1,13 +1,18 @@
 """지역별 Google OAuth 인증으로 유튜브에 영상을 올린다."""
 import pickle
 import re
+import socket
+import ssl
+import time
 from datetime import timezone
 
 
 def upload_video(credentials_path, video_path, plan, publish_at, immediate, place_name):
     from google.auth.transport.requests import Request
+    from googleapiclient.errors import HttpError
     from googleapiclient.discovery import build
     from googleapiclient.http import MediaFileUpload
+    from httplib2 import ServerNotFoundError
 
     with credentials_path.open("rb") as file:
         credentials = pickle.load(file)
@@ -34,6 +39,18 @@ def upload_video(credentials_path, video_path, plan, publish_at, immediate, plac
     request = service.videos().insert(part="snippet,status", body=body,
                                       media_body=MediaFileUpload(str(video_path), mimetype="video/mp4", resumable=True))
     response = None
+    failures = 0
     while response is None:
-        _, response = request.next_chunk()
+        try:
+            _, response = request.next_chunk()
+            failures = 0
+        except (socket.timeout, ConnectionError, ssl.SSLError, ServerNotFoundError, HttpError) as exc:
+            if isinstance(exc, HttpError) and exc.resp.status not in (500, 502, 503, 504):
+                raise
+            if failures >= 3:
+                raise
+            failures += 1
+            delay = 2 ** failures
+            print(f"유튜브 연결 오류: {delay}초 후 재시도 ({failures}/3): {exc}", flush=True)
+            time.sleep(delay)
     return response["id"]

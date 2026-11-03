@@ -230,3 +230,5 @@ completed_places.json
 *.wav
 res/technam_client_secret.json
 no_photo_places.json
+sql.sql
+process.json
