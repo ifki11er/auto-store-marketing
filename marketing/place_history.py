@@ -38,7 +38,9 @@ class PlaceHistory:
 
     def set_failure(self, place_id, reason):
         with self.db:
-            self.db.execute("UPDATE places SET posible = ? WHERE place_id = ?", (reason, place_id))
+            result = self.db.execute("UPDATE places SET posible = ? WHERE place_id = ?", (reason, place_id))
+            if result.rowcount != 1:
+                raise ValueError(f"DB에서 가게를 찾을 수 없습니다: {place_id}")
 
     def set_channel_if_missing(self, place_id, channel):
         with self.db:

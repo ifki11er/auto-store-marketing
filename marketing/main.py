@@ -60,13 +60,29 @@ class CollectionError(Exception):
     pass
 
 
+class PageHTTPError(CollectionError):
+    def __init__(self, page_name, status):
+        self.status = status
+        super().__init__(f"{page_name} HTTP {status}")
+
+
+def failure_reason(exc, stage):
+    if isinstance(exc, PageHTTPError):
+        return f"http {exc.status}"
+    if isinstance(exc, NoUsableReferencePhotos):
+        return "too much text"
+    if isinstance(exc, (TimeoutError, PlaywrightTimeout, requests.Timeout)) or isinstance(exc.__cause__, PlaywrightTimeout):
+        return f"{stage} timeout"
+    return f"{stage} {type(exc).__name__}"[:80]
+
+
 def place_availability(browser, place_url):
     """원본 장소 페이지의 기본 탭에서 후기와 사진의 유무를 확인한다."""
     page = browser.new_page(user_agent=HEADERS["User-Agent"])
     try:
         response = page.goto(place_url.split("#")[0], wait_until="domcontentloaded", timeout=30000)
         if response and not response.ok:
-            raise CollectionError(f"장소 페이지 HTTP {response.status}")
+            raise PageHTTPError("장소 페이지", response.status)
         page.locator(".main_detail .tab_primary .list_tab").wait_for(state="attached", timeout=15000)
         page.locator(".main_detail .section_grade").wait_for(state="attached", timeout=15000)
         tabs = page.locator(".main_detail .tab_primary .list_tab")
@@ -87,7 +103,7 @@ def reviews_for(browser, place_url, availability=None):
     try:
         response = page.goto(place_url.split("#")[0] + "#review", wait_until="domcontentloaded", timeout=30000)
         if response and not response.ok:
-            raise CollectionError(f"후기 페이지 HTTP {response.status}")
+            raise PageHTTPError("후기 페이지", response.status)
         empty = page.get_by_text(re.compile(r"등록된 후기가 없습니다|후기가 없습니다|후기가 없어요|등록된 리뷰가 없습니다|리뷰가 없습니다"))
         section = page.locator(".section_review")
         section.or_(empty).first.wait_for(state="attached", timeout=15000)
@@ -135,7 +151,7 @@ def photos_for(browser, place_url, folder, limit, availability=None):
     try:
         response = page.goto(place_url.split("#")[0] + "#photoview", wait_until="domcontentloaded", timeout=30000)
         if response and not response.ok:
-            raise CollectionError(f"사진 페이지 HTTP {response.status}")
+            raise PageHTTPError("사진 페이지", response.status)
         empty = page.get_by_text(re.compile(r"등록된 사진이 없습니다|사진이 없습니다|사진이 없어요"))
         section = page.locator(".view_photolist")
         section.or_(empty).first.wait_for(state="attached", timeout=15000)
@@ -477,6 +493,10 @@ def generate_video(base, photos, prompt, output, reference_audio=None):
 
 def add_subtitles(raw_video, output, shots, subtitle_name="subtitles.srt", place_name="", video_title=""):
     """기획 자막을 SRT와 ASS로 저장하고 장면별 스타일을 합성한다."""
+    watermark_setting = os.environ.get("WATERMARK_ENABLED", "true").strip().lower()
+    if watermark_setting not in ("true", "false"):
+        raise ValueError("WATERMARK_ENABLED는 true 또는 false로 설정하세요")
+    watermark_enabled = watermark_setting == "true"
     def timestamp(seconds, ass=False):
         units = round(float(seconds) * (100 if ass else 1000))
         factor = 100 if ass else 1000
@@ -523,7 +543,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     if not ffmpeg.is_file():
         raise FileNotFoundError(f"FFmpeg 실행 파일이 없습니다: {ffmpeg}")
     watermark = ROOT / "res" / "watermark.png"
-    if not watermark.is_file():
+    if watermark_enabled and not watermark.is_file():
         raise FileNotFoundError(f"워터마크 파일이 없습니다: {watermark}")
     with tempfile.TemporaryDirectory(dir=output.parent.resolve()) as temp_dir:
         if events:
@@ -535,12 +555,19 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             video_filter = "[0:v]ass=subtitles.ass:fontsdir=.[base]"
         else:
             video_filter = "[0:v]null[base]"
-        filters = (video_filter + ";[1:v]scale=120:-1,format=rgba,colorchannelmixer=aa=0.55[mark];"
-                   "[base][mark]overlay=W-w-24:H-h-24:format=auto[v]")
-        subprocess.run([str(ffmpeg), "-y", "-i", str(raw_video.resolve()), "-i", str(watermark),
-                        "-filter_complex", filters, "-map", "[v]", "-map", "0:a?",
-                        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18", "-c:a", "copy",
-                        str(output.resolve())], cwd=temp_dir, check=True)
+        command = [str(ffmpeg), "-y", "-i", str(raw_video.resolve())]
+        if watermark_enabled:
+            command += ["-i", str(watermark)]
+            filters = (video_filter + ";[1:v]scale=120:-1,format=rgba,colorchannelmixer=aa=0.55[mark];"
+                       "[base][mark]overlay=W-w-24:H-h-24:format=auto[v]")
+            video_map = "[v]"
+        else:
+            filters = video_filter
+            video_map = "[base]"
+        command += ["-filter_complex", filters, "-map", video_map, "-map", "0:a?",
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18", "-c:a", "copy",
+                    str(output.resolve())]
+        subprocess.run(command, cwd=temp_dir, check=True)
 
 
 def write_json(path, value):
@@ -620,105 +647,103 @@ def main(argv=None, single=False):
                     for key in ("generated_at", "publish_at", "channel", "posible", "upload_status", "youtube_video_id"):
                         place.pop(key, None)
                     place_id = str(place["place_id"])
-                    if place.get("category_group_code") in {"MT1", "PS3", "SC4", "OL7", "PO3", "AG2", "BK9", "CS2", "HP8", "PK6", "PM9", "SW8"}:
-                        print(f"제외 업종: {place_id} ({place['category_group_code']}) 건너뜀", flush=True)
-                        continue
-                    if is_chain_place(place):
-                        print(f"체인점: {place_id} {place['place_name']} 건너뜀", flush=True)
-                        continue
-                    if not place_id.isdigit() or not place.get("place_url"):
-                        print(f"건너뜀: 유효하지 않은 ID 또는 URL ({place_id})", flush=True)
-                        continue
-                    parsed = urlsplit(place["place_url"])
-                    if parsed.hostname != "place.map.kakao.com" or parsed.path.strip("/") != place_id:
-                        print(f"건너뜀: 유효하지 않은 카카오 장소 URL ({place_id})", flush=True)
-                        continue
-                    channel = channel_for_address(place.get("address_name") or place.get("road_address_name"))
-                    if schedule:
-                        if not channel:
-                            print(f"지역 채널 없음: {place_id} 건너뜀", flush=True)
-                            continue
-                        allocated = allocations[channel]
-                        if next_result_publication(schedule, allocated) is None:
-                            break
-                    completed_videos = (args.output / place_id / "video.mp4", ROOT / "test" / "results" / place_id / "video.mp4")
-                    if history.contains(place_id) or any(path.is_file() and path.stat().st_size > 0 for path in completed_videos):
-                        print(f"이미 영상이 완성된 가게: {place_id} 건너뜀", flush=True)
-                        continue
-                    print(f"가게 처리: {place_id} {place['place_name']}", flush=True)
-                    started = datetime.now()
-                    folder = args.output / "작업중" / place_id / started.strftime("%Y%m%d_%H%M%S_%f")
+                    stage = "data"
                     try:
+                        if place.get("category_group_code") in {"MT1", "PS3", "SC4", "OL7", "PO3", "AG2", "BK9", "CS2", "HP8", "PK6", "PM9", "SW8"}:
+                            print(f"제외 업종: {place_id} ({place['category_group_code']}) 건너뜀", flush=True)
+                            continue
+                        if is_chain_place(place):
+                            print(f"체인점: {place_id} {place['place_name']} 건너뜀", flush=True)
+                            continue
+                        if not place_id.isdigit() or not place.get("place_url"):
+                            history.set_failure(place_id, "invalid url")
+                            print(f"건너뜀: 유효하지 않은 ID 또는 URL ({place_id})", flush=True)
+                            continue
+                        parsed = urlsplit(place["place_url"])
+                        if parsed.hostname != "place.map.kakao.com" or parsed.path.strip("/") != place_id:
+                            history.set_failure(place_id, "invalid url")
+                            print(f"건너뜀: 유효하지 않은 카카오 장소 URL ({place_id})", flush=True)
+                            continue
+                        channel = channel_for_address(place.get("address_name") or place.get("road_address_name"))
+                        if schedule:
+                            if not channel:
+                                history.set_failure(place_id, "invalid region")
+                                print(f"지역 채널 없음: {place_id} 건너뜀", flush=True)
+                                continue
+                            allocated = allocations[channel]
+                            if next_result_publication(schedule, allocated) is None:
+                                break
+                        completed_videos = (args.output / place_id / "video.mp4", ROOT / "test" / "results" / place_id / "video.mp4")
+                        if history.contains(place_id) or any(path.is_file() and path.stat().st_size > 0 for path in completed_videos):
+                            print(f"이미 영상이 완성된 가게: {place_id} 건너뜀", flush=True)
+                            continue
+                        print(f"가게 처리: {place_id} {place['place_name']}", flush=True)
+                        started = datetime.now()
+                        folder = args.output / "작업중" / place_id / started.strftime("%Y%m%d_%H%M%S_%f")
+                        stage = "place"
                         availability = place_availability(browser, place["place_url"])
                         if not availability[1]:
                             history.set_failure(place_id, "no photo")
                             print("사진 없음: 건너뜀", flush=True)
                             continue
+                        stage = "reviews"
                         reviews = reviews_for(browser, place["place_url"], availability)
-                    except CollectionError as exc:
-                        if single or args.place_id or not isinstance(exc.__cause__, PlaywrightTimeout):
-                            raise
-                        print(f"후기 수집 시간 초과: {place_id} 건너뜀 ({exc})", flush=True)
-                        continue
-                    if not reviews:
-                        print("후기 없음: 후기 없이 진행", flush=True)
-                    with tempfile.TemporaryDirectory() as temp_dir:
-                        try:
+                        if not reviews:
+                            print("후기 없음: 후기 없이 진행", flush=True)
+                        with tempfile.TemporaryDirectory() as temp_dir:
+                            stage = "photos"
                             photos = photos_for(browser, place["place_url"], Path(temp_dir) / "photos", args.max_photos, availability)
-                        except CollectionError as exc:
-                            if single or args.place_id or not isinstance(exc.__cause__, PlaywrightTimeout):
-                                raise
-                            print(f"사진 수집 시간 초과: {place_id} 건너뜀 ({exc})", flush=True)
-                            continue
-                        if not photos:
-                            history.set_failure(place_id, "no photo")
-                            print("사진 없음: 건너뜀", flush=True)
-                            continue
-                        photo_folder = folder / "03_photos"
-                        photo_folder.mkdir(parents=True, exist_ok=True)
-                        photos = [Path(shutil.move(str(photo), str(photo_folder / photo.name))) for photo in photos]
-                    write_json(folder / "01_place.json", place)
-                    write_json(folder / "02_reviews.json", reviews)
-                    write_json(folder / "04_analysis_photos.json", photo_manifest(photos))
-                    analysis = analyze(recorded_client(client, folder, "analysis", "04"), photos)
-                    (folder / "04_analysis.txt").write_text(analysis, encoding="utf-8")
-                    try:
+                            if not photos:
+                                history.set_failure(place_id, "no photo")
+                                print("사진 없음: 건너뜀", flush=True)
+                                continue
+                            photo_folder = folder / "03_photos"
+                            photo_folder.mkdir(parents=True, exist_ok=True)
+                            photos = [Path(shutil.move(str(photo), str(photo_folder / photo.name))) for photo in photos]
+                        stage = "save"
+                        write_json(folder / "01_place.json", place)
+                        write_json(folder / "02_reviews.json", reviews)
+                        write_json(folder / "04_analysis_photos.json", photo_manifest(photos))
+                        stage = "analysis"
+                        analysis = analyze(recorded_client(client, folder, "analysis", "04"), photos)
+                        (folder / "04_analysis.txt").write_text(analysis, encoding="utf-8")
+                        stage = "plan"
                         result = plan(recorded_client(client, folder, "plan", "05"), place, reviews, analysis, photos)
-                    except NoUsableReferencePhotos as exc:
-                        history.set_failure(place_id, "too much text")
-                        print(f"사용할 수 있는 참조 사진 없음: {place_id} 건너뜀 ({exc})", flush=True)
+                        write_json(folder / "05_plan.json", result)
+                        write_json(folder / "05_marketing.json", {"가게": place, "후기": reviews, "사진_분석": analysis, "기획": result})
+                        stage = "video"
+                        reference_audio = narration_reference(result["15초_스크립트"])
+                        raw_video = folder / "06_video_raw.mp4"
+                        generate_video(args.comfy_url, selected_photos(result, photos), result["minimax_prompt"], raw_video, reference_audio)
+                        add_subtitles(raw_video, folder / "video.mp4", result["15초_스크립트"], subtitle_name="06_subtitles.srt", place_name=place["place_name"], video_title=result.get("영상_상단_제목") or result.get("후킹", ""))
+                        stage = "save"
+                        publication = next_result_publication(schedule, allocated) if schedule else None
+                        destination = result_folder(args.output, place_id, publication, datetime.now(KOREA_TIME))
+                        destination.parent.mkdir(parents=True, exist_ok=True)
+                        if destination.exists():
+                            raise FileExistsError(f"결과 폴더가 이미 있습니다. 생성된 결과는 {folder}에 보관했습니다: {destination}")
+                        staging_parent = folder.parent
+                        folder.rename(destination)
+                        for path in (staging_parent, staging_parent.parent):
+                            try:
+                                path.rmdir()
+                            except OSError:
+                                pass
+                        folder = destination
+                        history.add(place_id, channel, publication[0] if publication else None)
+                        if publication:
+                            allocations[channel].append(publication[0])
+                        record_process(place, folder / "video.mp4", publication[0] if publication else None)
+                        print(f"완료: {folder}", flush=True)
+                        completed += 1
+                        if single:
+                            return
+                        break
+                    except Exception as exc:
+                        reason = failure_reason(exc, stage)
+                        history.set_failure(place_id, reason)
+                        print(f"가게 처리 실패: {place_id} ({reason}: {exc})", file=sys.stderr, flush=True)
                         continue
-                    except PhotoAnalysisError as exc:
-                        print(f"사진 분석 결과 오류: {place_id} 건너뜀 ({exc})", flush=True)
-                        continue
-                    write_json(folder / "05_plan.json", result)
-                    write_json(folder / "05_marketing.json", {"가게": place, "후기": reviews, "사진_분석": analysis, "기획": result})
-                    reference_audio = narration_reference(result["15초_스크립트"])
-                    raw_video = folder / "06_video_raw.mp4"
-                    generate_video(args.comfy_url, selected_photos(result, photos), result["minimax_prompt"], raw_video, reference_audio)
-                    add_subtitles(raw_video, folder / "video.mp4", result["15초_스크립트"], subtitle_name="06_subtitles.srt", place_name=place["place_name"], video_title=result.get("영상_상단_제목") or result.get("후킹", ""))
-                    publication = next_result_publication(schedule, allocated) if schedule else None
-                    destination = result_folder(args.output, place_id, publication, datetime.now(KOREA_TIME))
-                    destination.parent.mkdir(parents=True, exist_ok=True)
-                    if destination.exists():
-                        raise FileExistsError(f"결과 폴더가 이미 있습니다. 생성된 결과는 {folder}에 보관했습니다: {destination}")
-                    staging_parent = folder.parent
-                    folder.rename(destination)
-                    for path in (staging_parent, staging_parent.parent):
-                        try:
-                            path.rmdir()
-                        except OSError:
-                            pass
-                    folder = destination
-                    history.add(place_id, channel, publication[0] if publication else None)
-                    if publication:
-                        allocations[channel].append(publication[0])
-                    record_process(place, folder / "video.mp4", publication[0] if publication else None)
-                    print(f"완료: {folder}", flush=True)
-                    completed += 1
-                    if single:
-                        return
-                    break
             print(f"처리 종료: {completed}개 가게 완료", flush=True)
         finally:
             browser.close()
