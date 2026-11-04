@@ -508,7 +508,7 @@ def add_subtitles(raw_video, output, shots, subtitle_name="subtitles.srt", place
 
     entries = []
     events = []
-    heading = video_title if isinstance(video_title, str) and video_title.strip() else place_name
+    heading = place_name
     if heading.strip():
         title = heading.strip().replace("\\", "＼").replace("{", "｛").replace("}", "｝").replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
         events.append(f"Dialogue: 0,{timestamp(0, True)},{timestamp(shots[-1]['종료초'], True)},Default,,0,0,0,,{{\\an8\\fs110\\c&H0080FF&}}{title}")
@@ -715,7 +715,7 @@ def main(argv=None, single=False):
                         reference_audio = narration_reference(result["15초_스크립트"])
                         raw_video = folder / "06_video_raw.mp4"
                         generate_video(args.comfy_url, selected_photos(result, photos), result["minimax_prompt"], raw_video, reference_audio)
-                        add_subtitles(raw_video, folder / "video.mp4", result["15초_스크립트"], subtitle_name="06_subtitles.srt", place_name=place["place_name"], video_title=result.get("영상_상단_제목") or result.get("후킹", ""))
+                        add_subtitles(raw_video, folder / "video.mp4", result["15초_스크립트"], subtitle_name="06_subtitles.srt", place_name=place["place_name"])
                         stage = "save"
                         publication = next_result_publication(schedule, allocated) if schedule else None
                         destination = result_folder(args.output, place_id, publication, datetime.now(KOREA_TIME))

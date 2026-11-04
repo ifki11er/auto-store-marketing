@@ -18,7 +18,6 @@ FORMAT_PROMPTS = {
     "정보형": "informational.md",
     "고급 광고형": "premium_ad.md",
     "체험형": "experience.md",
-    "셀카형": "selfie.md",
 }
 
 
