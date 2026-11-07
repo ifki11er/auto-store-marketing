@@ -225,7 +225,7 @@ def output_text(response):
 
 
 def analyze(client, photos):
-    content = [{"type": "input_text", "text": "사진을 한국어로 분석해 JSON 객체만 반환하세요. 가게_전체_특징은 사진 전체에서 확인되는 가게의 특징을 간결히 요약한 문자열 배열입니다. 사진별_정보는 입력 순서대로 모든 사진마다 파일명(문자열), 설명(문자열), 참조_사용_가능(JSON 불리언)을 가진 객체 배열입니다. 메뉴판, 가격표, 전단, 팸플릿, 안내문 등 글자가 주된 내용이거나 글자가 많이 포함된 사진은 참조_사용_가능을 false로 지정하세요. 그 외의 사진은 true로 지정하세요. 작은 간판이나 라벨이 일부 보이는 정도는 글자가 주된 내용이 아니라면 허용합니다. 사진에 보이지 않는 내용은 추측하지 말고 영상 장면, 구도, 연출이나 스토리를 제안하지 마세요."}]
+    content = [{"type": "input_text", "text": "사진을 한국어로 분석해 JSON 객체만 반환하세요. 가게_전체_특징은 사진 전체에서 확인되는 가게의 특징을 간결히 요약한 문자열 배열입니다. 사진별_정보는 입력 순서대로 모든 사진마다 파일명(문자열), 설명(문자열)을 가진 객체 배열입니다. 사진에 보이지 않는 내용은 추측하지 말고 영상 장면, 구도, 연출이나 스토리를 제안하지 마세요."}]
     for index, photo in enumerate(photos, 1):
         content.append({"type": "input_text", "text": f"사진 {index}: {photo.name}"})
         mime = mimetypes.guess_type(photo.name)[0]
@@ -235,7 +235,7 @@ def analyze(client, photos):
 
 
 class NoUsableReferencePhotos(ValueError):
-    """글자가 많은 사진을 제외하고 사용할 참조 사진이 없다."""
+    """사용할 참조 사진이 없다."""
 
 
 class PhotoAnalysisError(ValueError):
@@ -248,18 +248,18 @@ def reference_photo_candidates(analysis, photos):
         details = data["사진별_정보"]
         if not isinstance(details, list):
             raise ValueError
-        labels = {}
+        labels = set()
         for item in details:
-            if not isinstance(item, dict) or not isinstance(item.get("파일명"), str) or type(item.get("참조_사용_가능")) is not bool or item["파일명"] in labels:
+            if not isinstance(item, dict) or not isinstance(item.get("파일명"), str) or item["파일명"] in labels:
                 raise ValueError
-            labels[item["파일명"]] = item["참조_사용_가능"]
-        if set(labels) != {photo.name for photo in photos}:
+            labels.add(item["파일명"])
+        if labels != {photo.name for photo in photos}:
             raise ValueError
     except (TypeError, ValueError, KeyError) as exc:
-        raise PhotoAnalysisError("사진별 글자 판별 결과가 없거나 올바르지 않습니다. 사진 분석을 다시 실행하세요") from exc
-    eligible = [photo for photo in photos if labels[photo.name]]
+        raise PhotoAnalysisError("사진별 분석 결과가 없거나 올바르지 않습니다. 사진 분석을 다시 실행하세요") from exc
+    eligible = list(photos)
     if not eligible:
-        raise NoUsableReferencePhotos("글자가 많은 사진을 제외하면 사용할 참조 사진이 없습니다")
+        raise NoUsableReferencePhotos("사용할 참조 사진이 없습니다")
     return data, eligible
 
 
@@ -270,7 +270,7 @@ def plan(client, place, reviews, analysis, photos, prior_concepts=None):
     instruction = build_planning_prompt(place.get("category_group_code"), video_format=video_format)
     photo_analysis, eligible_photos = reference_photo_candidates(analysis, photos)
     features = photo_analysis.get("가게_전체_특징", [])
-    details = [item for item in photo_analysis["사진별_정보"] if item["참조_사용_가능"]]
+    details = photo_analysis["사진별_정보"]
     payload = {"오늘": datetime.now().astimezone().date().isoformat(), "가게": place, "후기": reviews,
                "가게_전체_특징": features}
     if prior_concepts is not None:
