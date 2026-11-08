@@ -94,7 +94,7 @@ def place_availability(browser, place_url):
         page.close()
 
 
-def reviews_for(browser, place_url, availability=None):
+def reviews_for(browser, place_url, availability=None, photo_folder=None, review_photos=None):
     if availability is None:
         availability = place_availability(browser, place_url)
     if not availability[0]:
@@ -111,8 +111,39 @@ def reviews_for(browser, place_url, availability=None):
             return []
         items = page.locator(".section_review .list_review > li")
         reviews = []
+        photo_urls = set()
         for i in range(items.count()):
             item = items.nth(i)
+            photo_names = []
+            if photo_folder is not None and review_photos is not None:
+                images = item.locator(".wrap_photo .list_photo img")
+                for j in range(images.count()):
+                    if len(review_photos) >= 5:
+                        break
+                    image = images.nth(j)
+                    src = next((image.get_attribute(attr) for attr in ("data-original", "data-src", "src")
+                                if image.get_attribute(attr)), None)
+                    if not src:
+                        continue
+                    url = urljoin(page.url, src)
+                    host = (urlsplit(url).hostname or "").lower()
+                    if not (host.endswith(".daumcdn.net") or host.endswith(".kakaocdn.net")) or url in photo_urls:
+                        continue
+                    photo_urls.add(url)
+                    try:
+                        response = requests.get(url, headers=HEADERS, timeout=30)
+                        response.raise_for_status()
+                        mime = response.headers.get("Content-Type", "").split(";")[0].lower()
+                        ext = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}.get(mime)
+                        if not ext or not response.content:
+                            continue
+                        photo_folder.mkdir(parents=True, exist_ok=True)
+                        path = photo_folder / f"review_photo_{len(review_photos) + 1}{ext}"
+                        path.write_bytes(response.content)
+                        review_photos.append(path)
+                        photo_names.append(path.name)
+                    except requests.RequestException:
+                        continue
             text = item.locator(".desc_review")
             if not text.count():
                 continue
@@ -124,9 +155,12 @@ def reviews_for(browser, place_url, availability=None):
             if content:
                 score = item.locator(".review_detail .starred_grade .screen_out")
                 date = item.locator(".review_detail .txt_date")
-                reviews.append({"내용": content,
-                                "평점": score.nth(1).text_content().strip() if score.count() > 1 else None,
-                                "작성일": date.first.text_content().strip() if date.count() else None})
+                review = {"내용": content,
+                          "평점": score.nth(1).text_content().strip() if score.count() > 1 else None,
+                          "작성일": date.first.text_content().strip() if date.count() else None}
+                if photo_names:
+                    review["사진"] = photo_names
+                reviews.append(review)
         if reviews:
             return reviews
         if items.count():
@@ -225,7 +259,7 @@ def output_text(response):
 
 
 def analyze(client, photos):
-    content = [{"type": "input_text", "text": "사진을 한국어로 분석해 JSON 객체만 반환하세요. 가게_전체_특징은 사진 전체에서 확인되는 가게의 특징을 간결히 요약한 문자열 배열입니다. 사진별_정보는 입력 순서대로 모든 사진마다 파일명(문자열), 설명(문자열)을 가진 객체 배열입니다. 사진에 보이지 않는 내용은 추측하지 말고 영상 장면, 구도, 연출이나 스토리를 제안하지 마세요."}]
+    content = [{"type": "input_text", "text": "사진을 한국어로 분석해 JSON 객체만 반환하세요. 가게_전체_특징은 사진 전체에서 확인되는 가게의 특징을 간결히 요약한 문자열 배열입니다. 사진별_정보는 입력 순서대로 모든 사진마다 파일명(문자열), 설명(문자열), 참조_사용_가능(JSON 불리언)을 가진 객체 배열입니다. 메뉴판, 가격표, 전단, 팸플릿, 안내문 등 글자가 주된 내용이거나 글자가 많이 포함된 사진은 참조_사용_가능을 false로 지정하세요. 그 외의 사진은 true로 지정하세요. 작은 간판이나 라벨이 일부 보이는 정도는 글자가 주된 내용이 아니라면 허용합니다. 사진에 보이지 않는 내용은 추측하지 말고 영상 장면, 구도, 연출이나 스토리를 제안하지 마세요."}]
     for index, photo in enumerate(photos, 1):
         content.append({"type": "input_text", "text": f"사진 {index}: {photo.name}"})
         mime = mimetypes.guess_type(photo.name)[0]
@@ -248,18 +282,18 @@ def reference_photo_candidates(analysis, photos):
         details = data["사진별_정보"]
         if not isinstance(details, list):
             raise ValueError
-        labels = set()
+        labels = {}
         for item in details:
-            if not isinstance(item, dict) or not isinstance(item.get("파일명"), str) or item["파일명"] in labels:
+            if not isinstance(item, dict) or not isinstance(item.get("파일명"), str) or type(item.get("참조_사용_가능")) is not bool or item["파일명"] in labels:
                 raise ValueError
-            labels.add(item["파일명"])
-        if labels != {photo.name for photo in photos}:
+            labels[item["파일명"]] = item["참조_사용_가능"]
+        if set(labels) != {photo.name for photo in photos}:
             raise ValueError
     except (TypeError, ValueError, KeyError) as exc:
         raise PhotoAnalysisError("사진별 분석 결과가 없거나 올바르지 않습니다. 사진 분석을 다시 실행하세요") from exc
-    eligible = list(photos)
+    eligible = [photo for photo in photos if labels[photo.name]]
     if not eligible:
-        raise NoUsableReferencePhotos("사용할 참조 사진이 없습니다")
+        raise NoUsableReferencePhotos("글자가 많은 사진을 제외하면 사용할 참조 사진이 없습니다")
     return data, eligible
 
 
@@ -270,7 +304,7 @@ def plan(client, place, reviews, analysis, photos, prior_concepts=None):
     instruction = build_planning_prompt(place.get("category_group_code"), video_format=video_format)
     photo_analysis, eligible_photos = reference_photo_candidates(analysis, photos)
     features = photo_analysis.get("가게_전체_특징", [])
-    details = photo_analysis["사진별_정보"]
+    details = [item for item in photo_analysis["사진별_정보"] if item["참조_사용_가능"]]
     payload = {"오늘": datetime.now().astimezone().date().isoformat(), "가게": place, "후기": reviews,
                "가게_전체_특징": features}
     if prior_concepts is not None:
@@ -511,6 +545,7 @@ def add_subtitles(raw_video, output, shots, subtitle_name="subtitles.srt", place
     heading = place_name
     if heading.strip():
         title = heading.strip().replace("\\", "＼").replace("{", "｛").replace("}", "｝").replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
+        title = r"\N".join(title[i:i + 12] for i in range(0, len(title), 12))
         events.append(f"Dialogue: 0,{timestamp(0, True)},{timestamp(shots[-1]['종료초'], True)},Default,,0,0,0,,{{\\an8\\fs110\\c&H0080FF&}}{title}")
     for shot in shots:
         text = shot["자막"].strip()
@@ -682,24 +717,22 @@ def main(argv=None, single=False):
                         folder = args.output / "작업중" / place_id / started.strftime("%Y%m%d_%H%M%S_%f")
                         stage = "place"
                         availability = place_availability(browser, place["place_url"])
-                        if not availability[1]:
-                            history.set_failure(place_id, "no photo")
-                            print("사진 없음: 건너뜀", flush=True)
-                            continue
-                        stage = "reviews"
-                        reviews = reviews_for(browser, place["place_url"], availability)
-                        if not reviews:
-                            print("후기 없음: 후기 없이 진행", flush=True)
                         with tempfile.TemporaryDirectory() as temp_dir:
+                            stage = "reviews"
+                            review_photos = []
+                            reviews = reviews_for(browser, place["place_url"], availability,
+                                                  Path(temp_dir) / "review_photos", review_photos)
+                            if not reviews:
+                                print("후기 없음: 후기 없이 진행", flush=True)
                             stage = "photos"
                             photos = photos_for(browser, place["place_url"], Path(temp_dir) / "photos", args.max_photos, availability)
-                            if not photos:
-                                history.set_failure(place_id, "no photo")
-                                print("사진 없음: 건너뜀", flush=True)
+                            if len(photos) + len(review_photos) < 2:
+                                history.set_failure(place_id, "less than 2 photos")
+                                print("사진 2장 미만: 건너뜀", flush=True)
                                 continue
                             photo_folder = folder / "03_photos"
                             photo_folder.mkdir(parents=True, exist_ok=True)
-                            photos = [Path(shutil.move(str(photo), str(photo_folder / photo.name))) for photo in photos]
+                            photos = [Path(shutil.move(str(photo), str(photo_folder / photo.name))) for photo in photos + review_photos]
                         stage = "save"
                         write_json(folder / "01_place.json", place)
                         write_json(folder / "02_reviews.json", reviews)
