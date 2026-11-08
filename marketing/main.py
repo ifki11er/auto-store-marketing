@@ -8,6 +8,7 @@ import os
 import re
 import subprocess
 import shutil
+import struct
 import tempfile
 from contextlib import closing
 from pathlib import Path
@@ -228,7 +229,7 @@ def photos_for(browser, place_url, folder, limit, availability=None):
             raise CollectionError("사진 영역을 확인하지 못했습니다. 카카오 페이지 구조를 확인하세요")
         folder.mkdir(parents=True, exist_ok=True)
         files = []
-        for url in urls:
+        for url in urls[::2] if len(urls) >= 20 else urls:
             try:
                 r = requests.get(url, headers=HEADERS, timeout=30)
                 r.raise_for_status()
@@ -525,6 +526,78 @@ def generate_video(base, photos, prompt, output, reference_audio=None):
     raise TimeoutError(f"ComfyUI 작업 대기 시간 초과: {prompt_id}")
 
 
+def wrap_title(title, font_path):
+    """기존 TrueType 폰트의 글자 폭으로 제목 줄을 나눈다."""
+    data = font_path.read_bytes()
+    u16 = lambda offset: struct.unpack_from(">H", data, offset)[0]
+    u32 = lambda offset: struct.unpack_from(">I", data, offset)[0]
+    tables = {}
+    for i in range(u16(4)):
+        offset = 12 + 16 * i
+        tables[data[offset:offset + 4]] = u32(offset + 8)
+    head, hhea, hmtx, cmap = (tables[name] for name in (b"head", b"hhea", b"hmtx", b"cmap"))
+    units = u16(head + 18)
+    metrics = u16(hhea + 34)
+    subtables = []
+    for i in range(u16(cmap + 2)):
+        record = cmap + 4 + 8 * i
+        platform, encoding = u16(record), u16(record + 2)
+        subtable = cmap + u32(record + 4)
+        fmt = u16(subtable)
+        if fmt in (4, 12) and (platform == 0 or (platform == 3 and encoding in (1, 10))):
+            subtables.append((fmt, subtable))
+    if not subtables:
+        raise ValueError("제목 폰트의 문자 매핑을 읽을 수 없습니다")
+    fmt, subtable = max(subtables)
+
+    def glyph(code):
+        if fmt == 12:
+            for i in range(u32(subtable + 12)):
+                group = subtable + 16 + 12 * i
+                start, end, first = struct.unpack_from(">III", data, group)
+                if start <= code <= end:
+                    return first + code - start
+            return 0
+        segments = u16(subtable + 6) // 2
+        ends = subtable + 14
+        starts = ends + 2 * segments + 2
+        deltas = starts + 2 * segments
+        ranges = deltas + 2 * segments
+        for i in range(segments):
+            if u16(starts + 2 * i) <= code <= u16(ends + 2 * i):
+                delta, distance = u16(deltas + 2 * i), u16(ranges + 2 * i)
+                if not distance:
+                    return (code + delta) & 0xffff
+                index = u16(ranges + 2 * i + distance + 2 * (code - u16(starts + 2 * i)))
+                return (index + delta) & 0xffff if index else 0
+        return 0
+
+    def width(text):
+        return sum(u16(hmtx + 4 * min(glyph(ord(char)), metrics - 1)) for char in text) * 110 / units
+
+    # 제목은 화면 양쪽에 45씩 남기고 외곽선과 렌더링 오차 여유를 둔다.
+    limit = 1080 - 2 * 45 - 20
+    lines = []
+    remaining = title
+    while remaining:
+        end = 0
+        while end < len(remaining) and width(remaining[:end + 1]) <= limit:
+            end += 1
+        if end == len(remaining):
+            lines.append(remaining)
+            break
+        if end == 0:
+            raise ValueError("제목 글자가 화면에 표시하기에 너무 넓습니다")
+        space = remaining.rfind(" ", 0, end + 1)
+        if space > 0 and width(remaining[:space]) >= limit * 0.75:
+            lines.append(remaining[:space])
+            remaining = remaining[space + 1:].lstrip()
+        else:
+            lines.append(remaining[:end])
+            remaining = remaining[end:].lstrip()
+    return r"\N".join(lines)
+
+
 def add_subtitles(raw_video, output, shots, subtitle_name="subtitles.srt", place_name="", video_title=""):
     """기획 자막을 SRT와 ASS로 저장하고 장면별 스타일을 합성한다."""
     watermark_setting = os.environ.get("WATERMARK_ENABLED", "true").strip().lower()
@@ -545,8 +618,8 @@ def add_subtitles(raw_video, output, shots, subtitle_name="subtitles.srt", place
     heading = place_name
     if heading.strip():
         title = heading.strip().replace("\\", "＼").replace("{", "｛").replace("}", "｝").replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
-        title = r"\N".join(title[i:i + 12] for i in range(0, len(title), 12))
-        events.append(f"Dialogue: 0,{timestamp(0, True)},{timestamp(shots[-1]['종료초'], True)},Default,,0,0,0,,{{\\an8\\fs110\\c&H0080FF&}}{title}")
+        title = wrap_title(title, ROOT / "font" / "Jua-Regular.ttf")
+        events.append(f"Dialogue: 0,{timestamp(0, True)},{timestamp(shots[-1]['종료초'], True)},Default,,0,0,0,,{{\\an8\\q2\\fs110\\c&H0080FF&}}{title}")
     for shot in shots:
         text = shot["자막"].strip()
         if not text:
@@ -669,6 +742,7 @@ def main(argv=None, single=False):
         else:
             groups = iter_region_place_iterators(db, args.after_id)
         browser = playwright.chromium.launch(headless=True)
+        completed_paths = []
         try:
             completed = 0
             for rows in groups:
@@ -767,6 +841,7 @@ def main(argv=None, single=False):
                         if publication:
                             allocations[channel].append(publication[0])
                         record_process(place, folder / "video.mp4", publication[0] if publication else None)
+                        completed_paths.append(folder)
                         print(f"완료: {folder}", flush=True)
                         completed += 1
                         if single:
@@ -780,6 +855,9 @@ def main(argv=None, single=False):
             print(f"처리 종료: {completed}개 가게 완료", flush=True)
         finally:
             browser.close()
+            print("완료 경로:", flush=True)
+            for path in completed_paths:
+                print(f"- {path}", flush=True)
 
 
 if __name__ == "__main__":
