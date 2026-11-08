@@ -337,6 +337,9 @@ def plan(client, place, reviews, analysis, photos, prior_concepts=None):
     else:
         if last_result is None:
             raise ValueError("세 번의 기획 응답 모두 사용할 수 있는 JSON 객체가 아닙니다") from error
+        last_shots = last_result.get("15초_스크립트")
+        if isinstance(last_shots, list) and any(reports_reference_material(shot.get("내레이션", "")) for shot in last_shots if isinstance(shot, dict)):
+            raise ValueError("대사에 후기나 사진을 분석하는 표현이 남아 있습니다") from error
         print("기획 검증에 세 번 실패하여 마지막으로 받은 JSON 객체를 그대로 사용합니다.", flush=True)
         result = last_result
     shots = result.get("15초_스크립트")
@@ -349,6 +352,12 @@ def plan(client, place, reviews, analysis, photos, prior_concepts=None):
     result["참조_가능_사진"] = [photo.name for photo in eligible_photos]
     selected_photos(result, photos)
     return result
+
+
+def reports_reference_material(text):
+    if not isinstance(text, str):
+        return False
+    return bool(re.search(r"(?:후기|리뷰)(?:에\s*따르면|에서|에는|를\s*(?:보면|살펴보면)|가\s*보여|(?:가|에서|에)\s*[^.!?\n]{0,40}(?:언급|나와|보여|확인))|사진(?:에서|을\s*보면)\s*[^.!?\n]{0,40}(?:확인|보여)", text))
 
 
 def validate_plan(result, photos):
@@ -370,6 +379,8 @@ def validate_plan(result, photos):
         narration = shot.get("내레이션")
         if not isinstance(narration, str) or re.search(r"[0-9]", narration):
             raise ValueError("대사는 문자열이어야 하며 숫자는 실제 읽는 한글 발음으로 작성해야 합니다")
+        if reports_reference_material(narration):
+            raise ValueError("대사에서 후기나 사진을 분석한 과정을 보고하지 말고 가게의 매력을 자연스럽게 소개하세요")
         if shot.get("발화_유형") not in ("나레이션", "화면발화", "없음"):
             raise ValueError("각 장면의 발화_유형은 나레이션, 화면발화, 없음 중 하나여야 합니다")
         if bool(narration.strip()) != (shot["발화_유형"] != "없음"):
