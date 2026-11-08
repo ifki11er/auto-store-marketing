@@ -221,7 +221,6 @@ __marimo__/
 bin/
 docs/
 output/
-test/
 kakao_places.db
 res/*.pickle
 font/
@@ -234,3 +233,5 @@ sql.sql
 process.json
 한글 잘 나오는 프롬프트.txt
 kakao_places_filtered - 복사본.db
+test/results/
+test/.instagram_browser_profile/
