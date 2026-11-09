@@ -337,6 +337,7 @@ def plan(client, place, reviews, analysis, photos, prior_concepts=None):
     else:
         if last_result is None:
             raise ValueError("세 번의 기획 응답 모두 사용할 수 있는 JSON 객체가 아닙니다") from error
+        validate_video_caption_instructions(last_result)
         last_shots = last_result.get("15초_스크립트")
         if isinstance(last_shots, list) and any(reports_reference_material(shot.get("내레이션", "")) for shot in last_shots if isinstance(shot, dict)):
             raise ValueError("대사에 후기나 사진을 분석하는 표현이 남아 있습니다") from error
@@ -360,7 +361,33 @@ def reports_reference_material(text):
     return bool(re.search(r"(?:후기|리뷰)(?:에\s*따르면|에서|에는|를\s*(?:보면|살펴보면)|가\s*보여|(?:가|에서|에)\s*[^.!?\n]{0,40}(?:언급|나와|보여|확인))|사진(?:에서|을\s*보면)\s*[^.!?\n]{0,40}(?:확인|보여)", text))
 
 
+def validate_video_caption_instructions(result):
+    prompt = result.get("minimax_prompt")
+    if not isinstance(prompt, str):
+        return
+    without_dialogue = re.sub(r"<d>.*?</d>", "", prompt, flags=re.DOTALL | re.IGNORECASE)
+    shots = result.get("15초_스크립트")
+    captions = [line.strip() for shot in shots if isinstance(shot, dict)
+                for line in (shot.get("자막") if isinstance(shot.get("자막"), str) else "").splitlines()
+                if len(line.strip()) >= 4] if isinstance(shots, list) else []
+    for sentence in re.split(r"[.!?;\n]", without_dialogue):
+        for caption in captions:
+            quoted = re.search(r"[\"'“‘]" + re.escape(caption) + r"[\"'”’]", sentence)
+            action = re.search(r"\b(?:add|display|render|overlay|insert|write|put)\b", sentence[:quoted.start()], re.IGNORECASE) if quoted else None
+            if action and not re.search(r"\b(?:do\s+not|don't|never|without|no)\s+(?:\w+\s+){0,3}$", sentence[:action.start()], re.IGNORECASE):
+                raise ValueError("minimax_prompt에 후처리 자막 문구를 표시하는 지시가 있습니다. 해당 지시를 제거하세요")
+        if (re.search(r"\bpost[\s-]*(?:production|produced)\b", sentence, re.IGNORECASE)
+                and re.search(r"\b(?:captions?|subtitles?|titles?|text|lettering|overlays?|display|show)\b", sentence, re.IGNORECASE)):
+            raise ValueError("minimax_prompt에 후처리 자막 또는 글자에 관한 언급이 있습니다. 해당 언급을 제거하세요")
+        if re.search(r"\b(?:leave|reserve|keep|make)\b.{0,100}\b(?:space|area|room)\b.{0,100}\b(?:captions?|subtitles?|on[- ]screen\s+text|text\s+overlays?)\b", sentence, re.IGNORECASE):
+            raise ValueError("minimax_prompt에 자막을 위한 공간을 남기는 지시가 있습니다. 해당 지시를 제거하세요")
+        match = re.search(r"\b(?:add|display|show|render|generate|include|overlay|insert|place|write|put)\b.{0,100}\b(?:captions?|subtitles?|on[- ]screen\s+text|text\s+overlays?)\b|\b(?:captions?|subtitles?)\b.{0,80}\b(?:appear|displayed|shown|rendered|overlaid)\b", sentence, re.IGNORECASE)
+        if match and not re.search(r"\b(?:do\s+not|don't|never|without|no)\s+(?:\w+\s+){0,3}$", sentence[:match.start()], re.IGNORECASE):
+            raise ValueError("minimax_prompt에 자막을 생성하거나 표시하는 지시가 있습니다. 해당 지시를 제거하세요")
+
+
 def validate_plan(result, photos):
+    validate_video_caption_instructions(result)
     if not isinstance(result.get("영상_형태"), str) or not result["영상_형태"].strip():
         raise ValueError("기획 결과에 영상 형태가 없습니다")
     for key in ("영상_컨셉", "스토리_요약", "기획_차별점", "핵심_메시지", "시청자_반응", "결말_의미"):
