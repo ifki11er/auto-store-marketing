@@ -5,6 +5,8 @@ import sys
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
+from googleapiclient.errors import HttpError
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from marketing.channel_regions import CHANNEL_ORDER, channel_for_address
 from marketing.place_history import PlaceHistory
@@ -64,9 +66,6 @@ def main():
         return
     history = PlaceHistory(DB_PATH)
     try:
-        if history.has_in_progress():
-            raise ValueError("업로드 결과가 확인되지 않은 이력이 있습니다. 유튜브에서 확인한 뒤 DB의 upload_status를 수정하세요")
-
         groups = {channel: [] for channel in CHANNEL_ORDER}
         seen_places = set()
         for folder, slot in ((folder, slot) for source, slot in sources for folder in sorted(source.iterdir())):
@@ -82,8 +81,10 @@ def main():
             if entry.get("업로드_상태") == "완료":
                 print(f"이미 업로드됨: {folder.name} 건너뜀", flush=True)
                 continue
-            if entry.get("업로드_상태") not in (None, ""):
+            if entry.get("업로드_상태") not in (None, "", "진행중"):
                 raise ValueError(f"확인할 수 없는 업로드 이력: {folder.name} ({entry['업로드_상태']})")
+            if entry.get("업로드_상태") == "진행중":
+                print(f"이전 진행중 이력 재시도: {folder.name} (유튜브에서 기존 업로드 여부를 확인하세요)", flush=True)
             if folder.name in seen_places:
                 raise ValueError(f"선택한 기간에 같은 가게의 미업로드 영상이 여러 개 있습니다: {folder.name}. 업로드할 영상 하나만 남겨 주세요.")
             seen_places.add(folder.name)
@@ -124,9 +125,20 @@ def main():
                     history.add(place_id, channel, generated_at=datetime.fromtimestamp(video.stat().st_mtime).astimezone().isoformat())
                 else:
                     history.set_channel_if_missing(place_id, channel)
-                history.set_upload(place_id, publish_at, "진행중")
                 print(f"업로드: {channel} {place_id} | {'즉시 공개' if immediate else '예약 공개'} {publish_at:%Y-%m-%d %H:%M:%S %z}", flush=True)
-                video_id = upload_video(AUTH_DIR / f"{channel}.pickle", video, plan, publish_at, immediate, place.get("place_name"))
+                try:
+                    video_id = upload_video(AUTH_DIR / f"{channel}.pickle", video, plan, publish_at, immediate, place.get("place_name"))
+                except HttpError as exc:
+                    try:
+                        error_details = json.loads(exc.content).get("error", {}).get("errors", [])
+                    except (ValueError, TypeError, AttributeError):
+                        error_details = []
+                    if any(isinstance(item, dict) and item.get("reason") == "uploadLimitExceeded" for item in error_details):
+                        print(f"{channel} 채널의 하루 업로드 한도에 도달했습니다. 24시간 후 다시 시도하세요. "
+                              f"가게 {place_id}의 업로드를 완료하지 못했습니다. "
+                              f"완료: {completed}/{total}개", file=sys.stderr, flush=True)
+                        raise SystemExit(1) from None
+                    raise
                 history.set_upload(place_id, publish_at, "완료", video_id)
                 completed += 1
                 print(f"업로드 완료: {place_id} ({video_id})", flush=True)

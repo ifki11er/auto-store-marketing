@@ -39,7 +39,9 @@
 
 `13_make_pickle.py`는 `res/technam_client_secret.json`의 Google OAuth 데스크톱 클라이언트로 선택한 유튜브 채널을 인증해 `res/tmp.pickle`을 만듭니다. 파일을 지역 이름으로 변경한 뒤 다시 실행해 다음 채널을 인증하세요. `tmp.pickle`이 이미 있으면 덮어쓰지 않습니다. 현재 Python 환경에 `google-auth-oauthlib`가 없다면 `python -m pip install google-auth-oauthlib`로 설치하세요.
 
-`14_upload_reviewed.py`는 `.env`의 `YOUTUBE_START_DATE`와 `YOUTUBE_END_DATE`에 지정한 기간(양쪽 날짜 포함)의 `output/YYYY-MM-DD/HHMM/<가게 ID>/`에서 검수 완료된 영상들을 지역별 채널에 실제 업로드합니다. 기존 시간 폴더 형식도 인식합니다. 공개 시각은 날짜·시간 폴더를 기준으로 하며, 공개 시간이 지났으면 즉시 공개하고 미래라면 그 시각으로 예약합니다. 제목·본문·태그는 각 `05_plan.json`을 사용합니다. 완료된 업로드는 DB 이력으로 건너뛰고, 업로드 도중 오류가 나면 중복을 막기 위해 `진행중`으로 남겨 재실행 전에 유튜브에서 확인해야 합니다.
+`14_upload_reviewed.py`는 `.env`의 `YOUTUBE_START_DATE`와 `YOUTUBE_END_DATE`에 지정한 기간(양쪽 날짜 포함)의 `output/YYYY-MM-DD/HHMM/<가게 ID>/`에서 검수 완료된 영상들을 지역별 채널에 실제 업로드합니다. 기존 시간 폴더 형식도 인식합니다. 공개 시각은 날짜·시간 폴더를 기준으로 하며, 공개 시간이 지났으면 즉시 공개하고 미래라면 그 시각으로 예약합니다. 제목·본문·태그는 각 `05_plan.json`을 사용합니다. 성공한 업로드만 DB에 완료로 기록하고 이미 완료된 영상은 건너뜁니다. 이전 `진행중` 이력도 재시도하므로 업로드 도중 중단된 경우 재실행 전에 유튜브에서 실제 업로드 여부를 확인해야 합니다.
+
+`18_check_youtube_auth.py`는 지역별 `res/<지역>.pickle`의 갱신 토큰을 Google에 확인하고 유효, 재인증 필요, 확인 불가로 출력합니다. 인증 파일과 DB는 수정하지 않으며 영상을 업로드하지 않습니다.
 
 `15_instagram_files.py`는 `.env`의 같은 날짜 범위에 있는 완성 영상을 `test/results/instagram/<실행 시각>/<지역>/`에 복사하고, 각 지역의 영상 설명과 태그를 해당 폴더의 `전체_설명.txt` 한 파일에 저장합니다. 실행할 때마다 새 폴더를 만들며 인스타그램 업로드는 하지 않습니다.
 
