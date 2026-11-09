@@ -381,9 +381,12 @@ def validate_video_caption_instructions(result):
             raise ValueError("minimax_prompt에 후처리 자막 또는 글자에 관한 언급이 있습니다. 해당 언급을 제거하세요")
         if re.search(r"\b(?:leave|reserve|keep|make)\b.{0,100}\b(?:space|area|room)\b.{0,100}\b(?:captions?|subtitles?|on[- ]screen\s+text|text\s+overlays?)\b", sentence, re.IGNORECASE):
             raise ValueError("minimax_prompt에 자막을 위한 공간을 남기는 지시가 있습니다. 해당 지시를 제거하세요")
-        match = re.search(r"\b(?:add|display|show|render|generate|include|overlay|insert|place|write|put)\b.{0,100}\b(?:captions?|subtitles?|on[- ]screen\s+text|text\s+overlays?)\b|\b(?:captions?|subtitles?)\b.{0,80}\b(?:appear|displayed|shown|rendered|overlaid)\b", sentence, re.IGNORECASE)
-        if match and not re.search(r"\b(?:do\s+not|don't|never|without|no)\s+(?:\w+\s+){0,3}$", sentence[:match.start()], re.IGNORECASE):
-            raise ValueError("minimax_prompt에 자막을 생성하거나 표시하는 지시가 있습니다. 해당 지시를 제거하세요")
+        pattern = r"\b(?:add|display|show|render|generate|include|overlay|insert|place|write|put)\b.{0,100}?\b(?:captions?|subtitles?|on[- ]screen\s+text|text\s+overlays?)\b|\b(?:captions?|subtitles?)\b.{0,80}?\b(?:appear|displayed|shown|rendered|overlaid)\b"
+        for match in re.finditer(pattern, sentence, re.IGNORECASE):
+            negative_before = re.search(r"\b(?:do\s+not|don't|never|without|no)\s+(?:\w+\s+){0,3}$", sentence[:match.start()], re.IGNORECASE)
+            negative_after_verb = re.match(r"\b(?:add|display|show|render|generate|include|overlay|insert|place|write|put)\s+(?:no|not|zero)\b", match.group(), re.IGNORECASE)
+            if not negative_before and not negative_after_verb:
+                raise ValueError(f"minimax_promptに 자막을 생성하거나 표시하는 지시가 있습니다: {match.group()}. 해당 지시를 제거하세요")
 
 
 def validate_plan(result, photos):
