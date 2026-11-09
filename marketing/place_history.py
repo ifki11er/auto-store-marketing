@@ -29,10 +29,10 @@ class PlaceHistory:
             if result.rowcount == 0 and self.get(place_id) is None:
                 raise ValueError(f"DB에서 가게를 찾을 수 없습니다: {place_id}")
 
-    def set_upload(self, place_id, publish_at, status, video_id=None):
+    def set_upload(self, place_id, publish_at, status, video_id=None, uploaded_at=None):
         with self.db:
-            result = self.db.execute("UPDATE places SET publish_at = ?, upload_status = ?, youtube_video_id = COALESCE(?, youtube_video_id) WHERE place_id = ?",
-                                     (publish_at.isoformat(), status, video_id, place_id))
+            result = self.db.execute("UPDATE places SET publish_at = ?, upload_status = ?, youtube_video_id = COALESCE(?, youtube_video_id), uploaded_at = COALESCE(?, uploaded_at) WHERE place_id = ?",
+                                     (publish_at.isoformat(), status, video_id, uploaded_at.isoformat() if uploaded_at else None, place_id))
             if result.rowcount != 1:
                 raise ValueError(f"DB에서 가게를 찾을 수 없습니다: {place_id}")
 

@@ -791,7 +791,7 @@ def main(argv=None, single=False):
                     break
                 for row in rows:
                     place = dict(row)
-                    for key in ("generated_at", "publish_at", "channel", "posible", "upload_status", "youtube_video_id"):
+                    for key in ("generated_at", "publish_at", "uploaded_at", "channel", "posible", "upload_status", "youtube_video_id"):
                         place.pop(key, None)
                     place_id = str(place["place_id"])
                     stage = "data"

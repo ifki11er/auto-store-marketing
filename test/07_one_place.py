@@ -43,7 +43,7 @@ def process_place(place_id):
         if row is None:
             raise ValueError(f"가게를 찾을 수 없습니다: {place_id}")
         place = dict(row)
-        for key in ("generated_at", "publish_at", "channel", "posible", "upload_status", "youtube_video_id"):
+        for key in ("generated_at", "publish_at", "uploaded_at", "channel", "posible", "upload_status", "youtube_video_id"):
             place.pop(key, None)
 
     print(f"가게 처리: {place_id} {place['place_name']}", flush=True)

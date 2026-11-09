@@ -139,7 +139,7 @@ def main():
                               f"완료: {completed}/{total}개", file=sys.stderr, flush=True)
                         raise SystemExit(1) from None
                     raise
-                history.set_upload(place_id, publish_at, "완료", video_id)
+                history.set_upload(place_id, publish_at, "완료", video_id, uploaded_at=datetime.now(KOREA_TIME))
                 completed += 1
                 print(f"업로드 완료: {place_id} ({video_id})", flush=True)
         print(f"업로드 종료: {completed}/{total}개 완료", flush=True)
