@@ -25,7 +25,7 @@ DB_PATH = ROOT / "kakao_places_filtered.db"
 RESULTS_DIR = ROOT / "test" / "results" / "12_all_formats"
 COMFY_URL = "http://127.0.0.1:8188"
 MAX_PHOTOS = 10
-MAX_FORMATS = 6  # 확인할 포맷 수 (자동부터 순서대로)
+MAX_FORMATS = 4  # 확인할 포맷 수 (자동부터 순서대로)
 GENERATE_VIDEO = True  # 기획만 확인: False, 영상까지 생성: True
 
 

@@ -16,7 +16,6 @@ CATEGORY_PROMPTS = {
 FORMAT_PROMPTS = {
     "브이로그형": "vlog.md",
     "정보형": "informational.md",
-    "고급 광고형": "premium_ad.md",
     "체험형": "experience.md",
 }
 
