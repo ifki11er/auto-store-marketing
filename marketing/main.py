@@ -386,7 +386,7 @@ def validate_video_caption_instructions(result):
             negative_before = re.search(r"\b(?:do\s+not|don't|never|without|no)\s+(?:\w+\s+){0,3}$", sentence[:match.start()], re.IGNORECASE)
             negative_after_verb = re.match(r"\b(?:add|display|show|render|generate|include|overlay|insert|place|write|put)\s+(?:no|not|zero)\b", match.group(), re.IGNORECASE)
             if not negative_before and not negative_after_verb:
-                raise ValueError(f"minimax_promptに 자막을 생성하거나 표시하는 지시가 있습니다: {match.group()}. 해당 지시를 제거하세요")
+                raise ValueError(f"minimax_prompt에 자막을 생성하거나 표시하는 지시가 있습니다: {match.group()}. 해당 지시를 제거하세요")
 
 
 def validate_plan(result, photos):
