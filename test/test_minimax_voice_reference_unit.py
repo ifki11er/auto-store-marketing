@@ -20,6 +20,27 @@ class Response:
 
 
 class ReferenceVoiceTests(unittest.TestCase):
+    def test_narration_rejects_independent_gender_and_missing_reference(self):
+        result = {"15초_스크립트": [{"발화_유형": "나레이션", "화자_ID": "S1"}],
+                  "음성_연출": [{"화자_ID": "S1", "목소리_설명": "<Audio 1> 참조"}],
+                  "minimax_prompt": "Use <Audio 1> for narrator S1. A woman enters the shop."}
+        main.validate_narration_voice(result)
+        result["minimax_prompt"] = "A female narrator uses <Audio 1>."
+        with self.assertRaisesRegex(ValueError, "성별"):
+            main.validate_narration_voice(result)
+        result["minimax_prompt"] = "Use <Audio 1> for narrator S1."
+        result["음성_연출"][0]["목소리_설명"] = "여성 나레이터"
+        with self.assertRaisesRegex(ValueError, "성별"):
+            main.validate_narration_voice(result)
+        result["음성_연출"][0]["목소리_설명"] = "참조 음성"
+        result["minimax_prompt"] = "Narrator S1 speaks."
+        with self.assertRaisesRegex(ValueError, "<Audio 1>"):
+            main.validate_narration_voice(result)
+
+    def test_prompt_audio_reference_requires_wav(self):
+        with self.assertRaisesRegex(ValueError, "참조 WAV"):
+            main.generate_video("http://unused", [Path("photo.jpg")], "Use <Audio 1>", Path("video.mp4"))
+
     def test_narration_duration_uses_korean_character_count(self):
         text = "가" * 25
         result = {key: "내용" for key in ("영상_형태", "영상_컨셉", "스토리_요약", "기획_차별점", "핵심_메시지", "시청자_반응", "결말_의미")}

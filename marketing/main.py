@@ -338,6 +338,7 @@ def plan(client, place, reviews, analysis, photos, prior_concepts=None):
         if last_result is None:
             raise ValueError("세 번의 기획 응답 모두 사용할 수 있는 JSON 객체가 아닙니다") from error
         validate_video_caption_instructions(last_result)
+        validate_narration_voice(last_result)
         last_shots = last_result.get("15초_스크립트")
         if isinstance(last_shots, list) and any(reports_reference_material(shot.get("내레이션", "")) for shot in last_shots if isinstance(shot, dict)):
             raise ValueError("대사에 후기나 사진을 분석하는 표현이 남아 있습니다") from error
@@ -389,8 +390,34 @@ def validate_video_caption_instructions(result):
                 raise ValueError(f"minimax_prompt에 자막을 생성하거나 표시하는 지시가 있습니다: {match.group()}. 해당 지시를 제거하세요")
 
 
+def validate_narration_voice(result):
+    shots = result.get("15초_스크립트")
+    if not isinstance(shots, list):
+        return
+    narrator_ids = {shot.get("화자_ID") for shot in shots if isinstance(shot, dict) and shot.get("발화_유형") == "나레이션"}
+    if not narrator_ids:
+        return
+    prompt = result.get("minimax_prompt")
+    if not isinstance(prompt, str) or "<Audio 1>" not in prompt:
+        raise ValueError("나레이션에는 제공된 WAV의 목소리 참조 <Audio 1>이 필요합니다")
+    voices = result.get("음성_연출")
+    if isinstance(voices, list):
+        for voice in voices:
+            if not isinstance(voice, dict) or voice.get("화자_ID") not in narrator_ids:
+                continue
+            description = voice.get("목소리_설명")
+            if isinstance(description, str) and re.search(r"남성|여성|남자|여자|\b(?:male|female|masculine|feminine)\b", description, re.IGNORECASE):
+                raise ValueError("나레이션의 성별을 따로 지정하지 말고 <Audio 1> 참조 음성의 목소리를 사용하세요")
+    without_dialogue = re.sub(r"<d>.*?</d>", "", prompt, flags=re.DOTALL | re.IGNORECASE)
+    gender = r"(?:female|male|woman|man|feminine|masculine)"
+    narrator = r"(?:narrator|narration|voice[ -]?over|narrative\s+voice)"
+    if re.search(rf"\b{gender}\s+(?:\w+\s+){{0,2}}{narrator}\b|\b{narrator}\s+(?:is\s+|with\s+(?:a\s+)?|has\s+(?:a\s+)?|as\s+(?:a\s+)?)?{gender}\b", without_dialogue, re.IGNORECASE):
+        raise ValueError("minimax_prompt에 나레이션의 성별을 별도로 지정하지 말고 <Audio 1> 참조 음성을 사용하세요")
+
+
 def validate_plan(result, photos):
     validate_video_caption_instructions(result)
+    validate_narration_voice(result)
     if not isinstance(result.get("영상_형태"), str) or not result["영상_형태"].strip():
         raise ValueError("기획 결과에 영상 형태가 없습니다")
     for key in ("영상_컨셉", "스토리_요약", "기획_차별점", "핵심_메시지", "시청자_반응", "결말_의미"):
@@ -447,8 +474,6 @@ def validate_plan(result, photos):
     dialogue = re.findall(r"<d>((?:(?!<d>|</d>).)*)</d>", result["minimax_prompt"], flags=re.DOTALL)
     if [text.strip() for text in dialogue] != [shot["내레이션"].strip() for shot in shots if shot["내레이션"].strip()]:
         raise ValueError("영상 프롬프트의 대사가 스크립트 대사와 순서대로 일치하지 않습니다")
-    if any(shot["발화_유형"] == "나레이션" for shot in shots) and "<Audio 1>" not in result["minimax_prompt"]:
-        raise ValueError("나레이션 프롬프트에 <Audio 1> 목소리 참조가 없습니다")
     selected = result.get("선택_사진")
     available = {photo.name for photo in photos}
     if not isinstance(selected, list) or not 1 <= len(selected) <= 9:
@@ -502,6 +527,8 @@ def narration_reference(shots):
 def generate_video(base, photos, prompt, output, reference_audio=None):
     if not 1 <= len(photos) <= 9:
         raise ValueError("ComfyUI에 전달할 사진은 1~9장이어야 합니다")
+    if "<Audio 1>" in prompt and reference_audio is None:
+        raise ValueError("프롬프트의 <Audio 1>에 연결할 참조 WAV가 없습니다")
     base = base.rstrip("/")
     workflow = json.loads(WORKFLOW.read_text(encoding="utf-8-sig"))
     inputs = workflow["235"]["inputs"]
@@ -543,6 +570,8 @@ def generate_video(base, photos, prompt, output, reference_audio=None):
     payload = {key: workflow[key] for key in needed}
     response = requests.post(base + "/prompt", json={"prompt": payload}, timeout=60)
     response.raise_for_status()
+    if reference_audio is not None:
+        print(f"나레이션 참조 WAV 전달: {reference_audio.name}", flush=True)
     prompt_id = response.json()["prompt_id"]
     print(f"ComfyUI 작업 ID: {prompt_id}", flush=True)
     deadline = time.monotonic() + 7200
