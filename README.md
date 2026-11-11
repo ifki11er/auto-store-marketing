@@ -29,10 +29,11 @@ python main.py
 
 ```powershell
 python main.py --place-id 12263892
+python main.py --workflow video_fasth3_ominiref_r2v
 python main.py --after-id 12263892 --max-photos 3 --comfy-url http://127.0.0.1:8188
 ```
 
-`--after-id`는 문자열 기준으로 해당 ID 다음 가게부터 검색합니다. 생성·공개 시간과 상태는 필터링 DB의 `places` 테이블에 기록하므로 `output`을 삭제해도 다시 생성하지 않습니다. `generated_at`은 생성 완료 시각, `publish_at`은 예정 또는 실제 공개 시각, `uploaded_at`은 실제 유튜브 업로드 완료 시각, `channel`은 지역 채널, `upload_status`는 업로드 상태, `youtube_video_id`는 업로드된 영상 ID입니다. 기존 JSON 파일은 이전 이력의 백업이며 실행 중 갱신하지 않습니다. 필터링 DB를 새로 만들 때는 기존 이력을 이전하고 `places`에 `uploaded_at TEXT` 열을 추가해야 합니다. 생성이 실패한 가게는 완료로 기록하지 않습니다. `--max-photos`로 다운로드 최대 수를 지정할 수 있습니다. `--output`과 `--db`로 경로를 바꿀 수 있습니다. 원격 ComfyUI를 사용할 경우 사진과 프롬프트가 해당 서버로 전송됩니다.
+`.env`의 `VIDEO_WORKFLOW`에 `Deno_MiniMax_H3_R2V_Turbo_8plus2` 또는 `video_fasth3_ominiref_r2v`를 지정합니다. 설정이 없으면 기존 `Deno_MiniMax_H3_R2V_Turbo_8plus2`를 사용합니다. `--workflow`를 지정하면 해당 실행에서 `.env` 설정보다 우선합니다. 선택한 워크플로우의 모델과 노드가 ComfyUI에 설치되어 있어야 합니다. `--after-id`는 문자열 기준으로 해당 ID 다음 가게부터 검색합니다. 생성·공개 시간과 상태는 필터링 DB의 `places` 테이블에 기록하므로 `output`을 삭제해도 다시 생성하지 않습니다. `generated_at`은 생성 완료 시각, `publish_at`은 예정 또는 실제 공개 시각, `uploaded_at`은 실제 유튜브 업로드 완료 시각, `channel`은 지역 채널, `upload_status`는 업로드 상태, `youtube_video_id`는 업로드된 영상 ID입니다. 기존 JSON 파일은 이전 이력의 백업이며 실행 중 갱신하지 않습니다. 필터링 DB를 새로 만들 때는 기존 이력을 이전하고 `places`에 `uploaded_at TEXT` 열을 추가해야 합니다. 생성이 실패한 가게는 완료로 기록하지 않습니다. `--max-photos`로 다운로드 최대 수를 지정할 수 있습니다. `--output`과 `--db`로 경로를 바꿀 수 있습니다. 원격 ComfyUI를 사용할 경우 사진과 프롬프트가 해당 서버로 전송됩니다.
 
 가게 처리 중 오류가 나면 DB의 `posible`에 간단한 실패 사유를 기록하고 다음 가게로 넘어갑니다. 사진 탭과 후기에서 가져온 사진이 총 2장 미만이면 `less than 2 photos`, 글자가 많은 사진만 있으면 `too much text`이며, HTTP 오류나 단계별 시간 초과 및 처리 오류도 기록합니다. 값이 있으면 DB 조회에서 제외하므로 다시 확인하려면 `posible`을 NULL 또는 빈 문자열로 변경하세요. DB에 접근할 수 없거나 실행 전 설정·폴더 검증에 실패한 경우에는 가게별 실패를 기록할 수 없어 프로그램이 중단됩니다.
 

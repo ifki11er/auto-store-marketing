@@ -339,6 +339,7 @@ def plan(client, place, reviews, analysis, photos, prior_concepts=None):
             raise ValueError("세 번의 기획 응답 모두 사용할 수 있는 JSON 객체가 아닙니다") from error
         validate_video_caption_instructions(last_result)
         validate_narration_voice(last_result)
+        validate_dialogue_format(last_result)
         last_shots = last_result.get("15초_스크립트")
         if isinstance(last_shots, list) and any(reports_reference_material(shot.get("내레이션", "")) for shot in last_shots if isinstance(shot, dict)):
             raise ValueError("대사에 후기나 사진을 분석하는 표현이 남아 있습니다") from error
@@ -415,6 +416,35 @@ def validate_narration_voice(result):
         raise ValueError("minimax_prompt에 나레이션의 성별을 별도로 지정하지 말고 <Audio 1> 참조 음성을 사용하세요")
 
 
+def validate_dialogue_format(result):
+    shots = result.get("15초_스크립트")
+    prompt = result.get("minimax_prompt")
+    if not isinstance(shots, list) or not isinstance(prompt, str):
+        raise ValueError("대사 형식을 확인할 스크립트 또는 영상 프롬프트가 없습니다")
+    spoken_shots = [shot for shot in shots if isinstance(shot, dict) and isinstance(shot.get("내레이션"), str) and shot["내레이션"].strip()]
+    matches = list(re.finditer(r"<d>((?:(?!<d>|</d>).)*)</d>", prompt, flags=re.DOTALL))
+    if len(matches) != len(spoken_shots):
+        raise ValueError("영상 프롬프트의 대사가 스크립트 대사와 순서대로 일치하지 않습니다")
+    speaker_order = []
+    previous_end = 0
+    for shot, match in zip(spoken_shots, matches):
+        speaker = shot.get("화자_ID")
+        if not isinstance(speaker, str) or not re.fullmatch(r"S[1-9][0-9]*", speaker):
+            raise ValueError("화자_ID는 S1, S2 등의 형식이어야 합니다")
+        if speaker not in speaker_order:
+            speaker_order.append(speaker)
+            if speaker != f"S{len(speaker_order)}":
+                raise ValueError("화자_ID는 발화 순서대로 S1부터 지정해야 합니다")
+        if f"({speaker})" not in prompt[previous_end:match.start()]:
+            raise ValueError(f"각 대사 앞에 화자 ID ({speaker})를 표시해야 합니다")
+        dialogue = match.group(1)
+        if not dialogue.startswith("[Korean] "):
+            raise ValueError("각 대사는 <d>[Korean] 대사</d> 형식이어야 합니다")
+        if dialogue[len("[Korean] "):].strip() != shot["내레이션"].strip():
+            raise ValueError("영상 프롬프트의 대사가 스크립트 대사와 순서대로 일치하지 않습니다")
+        previous_end = match.end()
+
+
 def validate_plan(result, photos):
     validate_video_caption_instructions(result)
     validate_narration_voice(result)
@@ -471,9 +501,7 @@ def validate_plan(result, photos):
         voice = voices_by_id.get(shot.get("화자_ID"))
         if voice is None:
             raise ValueError("대사가 있는 장면에 음성_연출의 화자_ID가 필요합니다")
-    dialogue = re.findall(r"<d>((?:(?!<d>|</d>).)*)</d>", result["minimax_prompt"], flags=re.DOTALL)
-    if [text.strip() for text in dialogue] != [shot["내레이션"].strip() for shot in shots if shot["내레이션"].strip()]:
-        raise ValueError("영상 프롬프트의 대사가 스크립트 대사와 순서대로 일치하지 않습니다")
+    validate_dialogue_format(result)
     selected = result.get("선택_사진")
     available = {photo.name for photo in photos}
     if not isinstance(selected, list) or not 1 <= len(selected) <= 9:
@@ -524,14 +552,21 @@ def narration_reference(shots):
     return path
 
 
-def generate_video(base, photos, prompt, output, reference_audio=None):
+def generate_video(base, photos, prompt, output, reference_audio=None, workflow_name=None):
     if not 1 <= len(photos) <= 9:
         raise ValueError("ComfyUI에 전달할 사진은 1~9장이어야 합니다")
     if "<Audio 1>" in prompt and reference_audio is None:
         raise ValueError("프롬프트의 <Audio 1>에 연결할 참조 WAV가 없습니다")
     base = base.rstrip("/")
-    workflow = json.loads(WORKFLOW.read_text(encoding="utf-8-sig"))
-    inputs = workflow["235"]["inputs"]
+    workflow_name = workflow_name or os.environ.get("VIDEO_WORKFLOW", "Deno_MiniMax_H3_R2V_Turbo_8plus2").strip()
+    if workflow_name == "Deno_MiniMax_H3_R2V_Turbo_8plus2":
+        workflow_path, reference_node, prompt_node, prompt_field, output_node, output_field = WORKFLOW, "235", "186", "text", "144", "gifs"
+    elif workflow_name == "video_fasth3_ominiref_r2v":
+        workflow_path, reference_node, prompt_node, prompt_field, output_node, output_field = ROOT / "workflow" / "video_fasth3_ominiref_r2v.json", "136", "138", "value", "92", "images"
+    else:
+        raise ValueError(f"지원하지 않는 워크플로우: {workflow_name}")
+    workflow = json.loads(workflow_path.read_text(encoding="utf-8-sig"))
+    inputs = workflow[reference_node]["inputs"]
     for key in list(inputs):
         if key.startswith(("ref_images.", "ref_videos.", "ref_video_audios.", "ref_audios.")):
             del inputs[key]
@@ -555,7 +590,7 @@ def generate_video(base, photos, prompt, output, reference_audio=None):
         node_id = str(9000 + len(photos))
         workflow[node_id] = {"class_type": "LoadAudio", "inputs": {"audio": name}}
         inputs["ref_audios.ref_audio_0"] = [node_id, 0]
-    workflow["186"]["inputs"]["text"] = prompt
+    workflow[prompt_node]["inputs"][prompt_field] = prompt
     workflow["132"]["inputs"]["value"] = 15
     # Submit only nodes reachable from the video output, removing sample assets.
     needed = set()
@@ -566,7 +601,7 @@ def generate_video(base, photos, prompt, output, reference_audio=None):
         for value in workflow[node]["inputs"].values():
             if isinstance(value, list) and len(value) == 2 and isinstance(value[0], str) and value[0] in workflow:
                 visit(value[0])
-    visit("144")
+    visit(output_node)
     payload = {key: workflow[key] for key in needed}
     response = requests.post(base + "/prompt", json={"prompt": payload}, timeout=60)
     response.raise_for_status()
@@ -585,7 +620,7 @@ def generate_video(base, photos, prompt, output, reference_audio=None):
         status = history.get("status", {})
         if status.get("status_str") == "error":
             raise RuntimeError(f"ComfyUI 생성 실패: {status.get('messages')}")
-        files = history.get("outputs", {}).get("144", {}).get("gifs", [])
+        files = history.get("outputs", {}).get(output_node, {}).get(output_field, [])
         if not files:
             raise RuntimeError("ComfyUI 결과에 영상이 없습니다")
         video = files[0]
@@ -795,8 +830,13 @@ def main(argv=None, single=False):
     parser.add_argument("--after-id", default="", help="이 ID 다음부터 검색")
     parser.add_argument("--max-photos", type=int, default=10, help="다운로드할 최대 사진 수 (최대 10장)")
     parser.add_argument("--comfy-url", default="http://127.0.0.1:8188")
+    parser.add_argument("--workflow", choices=("Deno_MiniMax_H3_R2V_Turbo_8plus2", "video_fasth3_ominiref_r2v"),
+                        default=os.environ.get("VIDEO_WORKFLOW", "Deno_MiniMax_H3_R2V_Turbo_8plus2").strip(),
+                        help="영상 생성 워크플로우 (.env의 VIDEO_WORKFLOW보다 우선)")
     parser.add_argument("--output", type=Path, default=ROOT / "output")
     args = parser.parse_args(argv)
+    if args.workflow not in ("Deno_MiniMax_H3_R2V_Turbo_8plus2", "video_fasth3_ominiref_r2v"):
+        parser.error("VIDEO_WORKFLOW에 지원하는 워크플로우 이름을 입력하세요")
     build_planning_prompt(None)  # 영상 생성 전에 포맷 설정을 확인한다.
     if args.max_photos is not None and args.max_photos < 1:
         parser.error("--max-photos는 1 이상이어야 합니다")
@@ -891,7 +931,7 @@ def main(argv=None, single=False):
                         stage = "video"
                         reference_audio = narration_reference(result["15초_스크립트"])
                         raw_video = folder / "06_video_raw.mp4"
-                        generate_video(args.comfy_url, selected_photos(result, photos), result["minimax_prompt"], raw_video, reference_audio)
+                        generate_video(args.comfy_url, selected_photos(result, photos), result["minimax_prompt"], raw_video, reference_audio, args.workflow)
                         add_subtitles(raw_video, folder / "video.mp4", result["15초_스크립트"], subtitle_name="06_subtitles.srt", place_name=place["place_name"])
                         stage = "save"
                         publication = next_result_publication(schedule, allocated) if schedule else None
