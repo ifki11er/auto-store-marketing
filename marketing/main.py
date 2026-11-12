@@ -561,6 +561,8 @@ def generate_video(base, photos, prompt, output, reference_audio=None, workflow_
     workflow_name = workflow_name or os.environ.get("VIDEO_WORKFLOW", "Deno_MiniMax_H3_R2V_Turbo_8plus2").strip()
     if workflow_name == "Deno_MiniMax_H3_R2V_Turbo_8plus2":
         workflow_path, reference_node, prompt_node, prompt_field, output_node, output_field = WORKFLOW, "235", "186", "text", "144", "gifs"
+    elif workflow_name == "Deno_minimax_final_R2V_7plus1_memopt_Sol":
+        workflow_path, reference_node, prompt_node, prompt_field, output_node, output_field = ROOT / "workflow" / "Deno_minimax_final_R2V_7plus1_memopt_Sol.json", "214", "186", "text", "144", "gifs"
     elif workflow_name == "video_fasth3_ominiref_r2v":
         workflow_path, reference_node, prompt_node, prompt_field, output_node, output_field = ROOT / "workflow" / "video_fasth3_ominiref_r2v.json", "136", "138", "value", "92", "images"
     else:
@@ -830,12 +832,12 @@ def main(argv=None, single=False):
     parser.add_argument("--after-id", default="", help="이 ID 다음부터 검색")
     parser.add_argument("--max-photos", type=int, default=10, help="다운로드할 최대 사진 수 (최대 10장)")
     parser.add_argument("--comfy-url", default="http://127.0.0.1:8188")
-    parser.add_argument("--workflow", choices=("Deno_MiniMax_H3_R2V_Turbo_8plus2", "video_fasth3_ominiref_r2v"),
+    parser.add_argument("--workflow", choices=("Deno_MiniMax_H3_R2V_Turbo_8plus2", "video_fasth3_ominiref_r2v", "Deno_minimax_final_R2V_7plus1_memopt_Sol"),
                         default=os.environ.get("VIDEO_WORKFLOW", "Deno_MiniMax_H3_R2V_Turbo_8plus2").strip(),
                         help="영상 생성 워크플로우 (.env의 VIDEO_WORKFLOW보다 우선)")
     parser.add_argument("--output", type=Path, default=ROOT / "output")
     args = parser.parse_args(argv)
-    if args.workflow not in ("Deno_MiniMax_H3_R2V_Turbo_8plus2", "video_fasth3_ominiref_r2v"):
+    if args.workflow not in ("Deno_MiniMax_H3_R2V_Turbo_8plus2", "video_fasth3_ominiref_r2v", "Deno_minimax_final_R2V_7plus1_memopt_Sol"):
         parser.error("VIDEO_WORKFLOW에 지원하는 워크플로우 이름을 입력하세요")
     build_planning_prompt(None)  # 영상 생성 전에 포맷 설정을 확인한다.
     if args.max_photos is not None and args.max_photos < 1:
