@@ -17,6 +17,7 @@ from marketing.process_log import record_process
 
 PLACE_IDS = [
     "1001324985",  # 테스트할 가게 ID를 추가하세요
+    "100349838"
 ]
 DB_PATH = ROOT / "kakao_places_filtered.db"
 OUTPUT_DIR = ROOT / "test" / "results" / "07_one_place"
