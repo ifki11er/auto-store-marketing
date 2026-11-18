@@ -16,14 +16,10 @@ from marketing.place_history import PlaceHistory
 from marketing.process_log import record_process
 
 PLACE_IDS = [
-    "10036488",  # 테스트할 가게 ID를 추가하세요,
-    "100291869",
-    "100355415",
-    "1001599374",
-    "1006865012",
+    "1006865012",  # 테스트할 가게 ID를 추가하세요,
+    "10014440",
     "10060713",
-    "1003703505",
-    "10036299"
+    "1006954263"
 ]
 DB_PATH = ROOT / "kakao_places_filtered.db"
 OUTPUT_DIR = ROOT / "test" / "results" / "07_one_place"
