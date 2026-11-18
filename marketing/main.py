@@ -341,6 +341,7 @@ def plan(client, place, reviews, analysis, photos, prior_concepts=None):
         validate_narration_voice(last_result)
         validate_dialogue_format(last_result)
         last_shots = last_result.get("15초_스크립트")
+        validate_subscription(last_shots)
         if isinstance(last_shots, list) and any(reports_reference_material(shot.get("내레이션", "")) for shot in last_shots if isinstance(shot, dict)):
             raise ValueError("대사에 후기나 사진을 분석하는 표현이 남아 있습니다") from error
         print("기획 검증에 세 번 실패하여 마지막으로 받은 JSON 객체를 그대로 사용합니다.", flush=True)
@@ -361,6 +362,12 @@ def reports_reference_material(text):
     if not isinstance(text, str):
         return False
     return bool(re.search(r"(?:후기|리뷰)(?:에\s*따르면|에서|에는|를\s*(?:보면|살펴보면)|가\s*보여|(?:가|에서|에)\s*[^.!?\n]{0,40}(?:언급|나와|보여|확인))|사진(?:에서|을\s*보면)\s*[^.!?\n]{0,40}(?:확인|보여)", text))
+
+
+def validate_subscription(shots):
+    spoken = [shot.get("내레이션", "") for shot in shots if isinstance(shot, dict) and isinstance(shot.get("내레이션"), str) and shot["내레이션"].strip()] if isinstance(shots, list) else []
+    if not spoken or "구독" not in spoken[-1]:
+        raise ValueError("마지막 대사에 자연스러운 구독 유도를 포함하세요")
 
 
 def validate_video_caption_instructions(result):
@@ -456,6 +463,7 @@ def validate_plan(result, photos):
     shots = result.get("15초_스크립트")
     if not isinstance(shots, list) or not shots or not result.get("minimax_prompt"):
         raise ValueError("기획 결과에 스크립트 또는 영상 프롬프트가 없습니다")
+    validate_subscription(shots)
     end = 0.0
     for shot in shots:
         start, stop = float(shot["시작초"]), float(shot["종료초"])
@@ -592,7 +600,7 @@ def generate_video(base, photos, prompt, output, reference_audio=None, workflow_
         node_id = str(9000 + len(photos))
         workflow[node_id] = {"class_type": "LoadAudio", "inputs": {"audio": name}}
         inputs["ref_audios.ref_audio_0"] = [node_id, 0]
-    workflow[prompt_node]["inputs"][prompt_field] = prompt
+    workflow[prompt_node]["inputs"][prompt_field] = prompt + "\nDo not generate subtitles, captions, titles, or other added on-screen text. Preserve existing lettering in reference images."
     workflow["132"]["inputs"]["value"] = 15
     # Submit only nodes reachable from the video output, removing sample assets.
     needed = set()
