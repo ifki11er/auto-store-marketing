@@ -2,7 +2,7 @@
 import sqlite3
 from pathlib import Path
 
-PLACE_ID = "100134322"  # 제외할 카카오 장소 ID
+PLACE_ID = "1004869909"  # 제외할 카카오 장소 ID
 DB_PATH = Path(__file__).resolve().parent.parent / "kakao_places_filtered.db"
 
 if not PLACE_ID.strip():
