@@ -1001,6 +1001,17 @@ def trim_voice_boundary_silence(path, duration):
     return trimmed, (last_frame - first_frame) / rate
 
 
+def speed_up_voice(path):
+    """Qwen 음성의 속도를 1.1배로 바꾸고 실제 WAV 길이를 반환한다."""
+    ffmpeg = ROOT / "bin" / ("ffmpeg.exe" if os.name == "nt" else "ffmpeg")
+    output = path.with_name(path.stem + "_1_1x.wav")
+    subprocess.run([str(ffmpeg), "-hide_banner", "-loglevel", "error", "-nostdin", "-n", "-i", str(path),
+                    "-af", "atempo=1.1", "-c:a", "pcm_s16le", str(output)], check=True)
+    with wave.open(str(output), "rb") as audio:
+        duration = audio.getnframes() / audio.getframerate()
+    return output, duration
+
+
 def generate_qwen_batch(jobs, client=None):
     if not jobs:
         return {}
@@ -1041,6 +1052,9 @@ def generate_qwen_batch(jobs, client=None):
                     if shortened_duration < duration:
                         print(f"말 사이 무음을 줄였습니다: {duration:.2f}초 → {shortened_duration:.2f}초", flush=True)
                     duration = shortened_duration
+                    candidate, adjusted_duration = speed_up_voice(candidate)
+                    print(f"음성 속도 1.1배 적용: {duration:.2f}초 → {adjusted_duration:.2f}초", flush=True)
+                    duration = adjusted_duration
                     if duration > 15:
                         candidate, trimmed_duration = trim_voice_boundary_silence(candidate, duration)
                         if trimmed_duration < duration:

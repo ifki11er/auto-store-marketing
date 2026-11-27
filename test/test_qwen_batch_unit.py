@@ -130,6 +130,7 @@ class QwenBatchTests(unittest.TestCase):
             with patch.object(main.subprocess, "Popen", return_value=Worker()) as popen, \
                  patch.object(main.subprocess, "run", side_effect=whisper), \
                  patch.object(main, "shorten_voice_pauses", side_effect=lambda path, duration: (path, duration)), \
+                 patch.object(main, "speed_up_voice", side_effect=lambda path: (path, 16.0 if "attempt_1" in path.name else 10.0)), \
                  patch.object(main, "trim_voice_boundary_silence", side_effect=lambda path, duration: (path, duration)), \
                  patch.object(main, "recorded_client", return_value=object()), \
                  patch.object(main, "plan", return_value=shorter) as replan:
@@ -172,6 +173,20 @@ class QwenBatchTests(unittest.TestCase):
                 output = wav.readframes(wav.getnframes())
             self.assertEqual(output[:rate * 2], struct.pack(f"<{rate}h", *tone))
             self.assertEqual(output[-rate * 2:], struct.pack(f"<{rate}h", *tone))
+            self.assertTrue(source.is_file())
+
+    def test_voice_speed_increases_and_duration_is_measured(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "voice.wav"
+            rate = 8000
+            samples = [round(12000 * math.sin(2 * math.pi * 440 * i / rate)) for i in range(rate * 2)]
+            with wave.open(str(source), "wb") as wav:
+                wav.setparams((1, 2, rate, 0, "NONE", "not compressed"))
+                wav.writeframes(struct.pack(f"<{len(samples)}h", *samples))
+            output, duration = main.speed_up_voice(source)
+            self.assertAlmostEqual(duration, 2 / 1.1, delta=0.05)
+            with wave.open(str(output), "rb") as wav:
+                self.assertAlmostEqual(duration, wav.getnframes() / wav.getframerate())
             self.assertTrue(source.is_file())
 
     def test_voice_mixes_with_video_audio(self):
