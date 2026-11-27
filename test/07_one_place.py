@@ -16,6 +16,21 @@ from marketing.place_history import PlaceHistory
 from marketing.process_log import record_process
 
 PLACE_IDS = [
+    '100144306',
+    # '1002561615',
+    # '1003487151',
+    # '1005068736',
+    # '10039855',
+    # '100350274',
+    # '1001485955',
+    # '1008994805',
+    # '1009039871',
+    # '100563063',
+    # '1001502265',
+    # '1002063421',
+    # '1002637486',
+    # '1009076133'
+    
 ]
 DB_PATH = ROOT / "kakao_places_filtered.db"
 OUTPUT_DIR = ROOT / "test" / "results" / "07_one_place"
