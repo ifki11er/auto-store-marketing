@@ -16,6 +16,7 @@ from types import SimpleNamespace
 import sqlite3
 import sys
 import time
+import wave
 from datetime import datetime
 from urllib.parse import urljoin, urlsplit
 
@@ -317,7 +318,7 @@ def plan(client, place, reviews, analysis, photos, prior_concepts=None, revision
                     "MiniMax_가이드": (ROOT / "marketing" / "prompts" / "minimax_qwen_guide.md" if qwen_tts_enabled() else GUIDE).read_text(encoding="utf-8-sig")})
     base_input = "다음 자료를 바탕으로 JSON 객체를 작성하세요.\n" + json.dumps(payload, ensure_ascii=False)
     if revision_feedback:
-        base_input += "\n이전 대본을 Qwen으로 읽은 결과: " + revision_feedback + " 핵심 매력과 흐름을 살리면서 15초 이내에 읽을 수 있도록 대본과 전체 기획을 다시 작성하세요."
+        base_input += "\n이전 대본을 Qwen으로 읽은 결과: " + revision_feedback + " 핵심 매력과 흐름을 살리면서 15초 이내에 읽을 수 있도록 대본과 전체 기획을 다시 작성하세요. 짧게 줄이더라도 자연스러운 구어체와 완결된 문장 끝맺음을 유지하세요."
     error = None
     last_result = None
     for attempt in range(3):
@@ -934,6 +935,70 @@ def next_result_publication(schedule, allocated):
     return (planned, False) if planned is not None else None
 
 
+def voice_silence_intervals(path, duration, minimum):
+    """FFmpeg가 감지한 무음 구간을 초 단위로 반환한다."""
+    ffmpeg = ROOT / "bin" / ("ffmpeg.exe" if os.name == "nt" else "ffmpeg")
+    result = subprocess.run([str(ffmpeg), "-hide_banner", "-nostats", "-i", str(path), "-af",
+                             f"silencedetect=noise=-45dB:d={minimum}", "-f", "null", "-"],
+                            capture_output=True, text=True, encoding="utf-8", errors="replace", check=True)
+    events = [(m.group(1), float(m.group(2))) for m in re.finditer(r"silence_(start|end):\s*([\d.]+)", result.stderr)]
+    intervals, start = [], None
+    for kind, value in events:
+        if kind == "start":
+            start = value
+        elif start is not None:
+            intervals.append((start, value))
+            start = None
+    if start is not None:
+        intervals.append((start, duration))
+    return intervals
+
+
+def shorten_voice_pauses(path, duration):
+    """말 사이 0.5초 이상 무음을 0.3초 남기고 줄인다."""
+    intervals = voice_silence_intervals(path, duration, 0.5)
+    cuts = [(start + 0.15, end - 0.15) for start, end in intervals
+            if start > 0.001 and end < duration - 0.05 and end - start > 0.5]
+    if not cuts:
+        return path, duration
+    shortened = path.with_name(path.stem + "_pauses.wav")
+    with wave.open(str(path), "rb") as source:
+        rate, total = source.getframerate(), source.getnframes()
+        boundaries = [(max(0, int(start * rate)), min(total, int(end * rate))) for start, end in cuts]
+        with wave.open(str(shortened), "wb") as target:
+            target.setparams(source.getparams())
+            position = 0
+            for start, end in boundaries:
+                source.setpos(position)
+                target.writeframes(source.readframes(start - position))
+                position = end
+            source.setpos(position)
+            target.writeframes(source.readframes(total - position))
+    removed = sum(end - start for start, end in boundaries)
+    return shortened, (total - removed) / rate
+
+
+def trim_voice_boundary_silence(path, duration):
+    """15초가 넘는 WAV에서 앞뒤 무음만 일부 줄여 들어갈 때만 새 파일을 만든다."""
+    intervals = voice_silence_intervals(path, duration, 0.1)
+    padding = 0.05
+    first = max(0.0, intervals[0][1] - padding) if intervals and intervals[0][0] <= 0.001 else 0.0
+    last = min(duration, intervals[-1][0] + padding) if intervals and intervals[-1][1] >= duration - 0.05 else duration
+    if last <= first or last - first > 15 or (first == 0 and last == duration):
+        return path, duration
+    trimmed = path.with_name(path.stem + "_trimmed.wav")
+    with wave.open(str(path), "rb") as source:
+        rate = source.getframerate()
+        first_frame = max(0, int(first * rate))
+        last_frame = min(source.getnframes(), int(last * rate))
+        source.setpos(first_frame)
+        audio = source.readframes(last_frame - first_frame)
+        with wave.open(str(trimmed), "wb") as target:
+            target.setparams(source.getparams())
+            target.writeframes(audio)
+    return trimmed, (last_frame - first_frame) / rate
+
+
 def generate_qwen_batch(jobs, client=None):
     if not jobs:
         return {}
@@ -970,6 +1035,15 @@ def generate_qwen_batch(jobs, client=None):
                     if voice.get("error"):
                         raise ValueError(voice["error"])
                     duration = float(voice["duration"])
+                    candidate, shortened_duration = shorten_voice_pauses(candidate, duration)
+                    if shortened_duration < duration:
+                        print(f"말 사이 무음을 줄였습니다: {duration:.2f}초 → {shortened_duration:.2f}초", flush=True)
+                    duration = shortened_duration
+                    if duration > 15:
+                        candidate, trimmed_duration = trim_voice_boundary_silence(candidate, duration)
+                        if trimmed_duration < duration:
+                            print(f"음성 앞뒤 무음을 줄였습니다: {duration:.2f}초 → {trimmed_duration:.2f}초", flush=True)
+                        duration = trimmed_duration
                     if duration <= 15:
                         path = folder / "06_narration.wav"
                         shutil.copy2(candidate, path)

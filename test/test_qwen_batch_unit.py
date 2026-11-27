@@ -129,6 +129,8 @@ class QwenBatchTests(unittest.TestCase):
             job = {"folder": root, "result": first, "place": {}, "reviews": [], "analysis": "{}", "photos": []}
             with patch.object(main.subprocess, "Popen", return_value=Worker()) as popen, \
                  patch.object(main.subprocess, "run", side_effect=whisper), \
+                 patch.object(main, "shorten_voice_pauses", side_effect=lambda path, duration: (path, duration)), \
+                 patch.object(main, "trim_voice_boundary_silence", side_effect=lambda path, duration: (path, duration)), \
                  patch.object(main, "recorded_client", return_value=object()), \
                  patch.object(main, "plan", return_value=shorter) as replan:
                 result = main.generate_qwen_batch([job], object())
@@ -136,6 +138,41 @@ class QwenBatchTests(unittest.TestCase):
             self.assertEqual(replan.call_count, 1)
             self.assertEqual(job["result"], shorter)
             self.assertEqual(result[str(root.resolve())]["clips"][0]["duration"], 10.0)
+
+    def test_trim_only_boundary_silence_when_it_fits_15_seconds(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "voice.wav"
+            rate = 8000
+            samples = ([0] * int(rate * 0.7) +
+                       [round(12000 * math.sin(2 * math.pi * 440 * i / rate)) for i in range(int(rate * 14.8))] +
+                       [0] * int(rate * 0.3))
+            with wave.open(str(source), "wb") as wav:
+                wav.setparams((1, 2, rate, 0, "NONE", "not compressed"))
+                wav.writeframes(struct.pack(f"<{len(samples)}h", *samples))
+            trimmed, duration = main.trim_voice_boundary_silence(source, len(samples) / rate)
+            self.assertNotEqual(trimmed, source)
+            self.assertLessEqual(duration, 15)
+            with wave.open(str(trimmed), "rb") as wav:
+                self.assertAlmostEqual(wav.getnframes() / wav.getframerate(), duration)
+            self.assertTrue(source.is_file())
+
+    def test_shorten_internal_pause_keeps_speech_and_original(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "voice.wav"
+            rate = 8000
+            tone = [round(12000 * math.sin(2 * math.pi * 440 * i / rate)) for i in range(rate)]
+            samples = tone + [0] * int(rate * 0.8) + tone
+            with wave.open(str(source), "wb") as wav:
+                wav.setparams((1, 2, rate, 0, "NONE", "not compressed"))
+                wav.writeframes(struct.pack(f"<{len(samples)}h", *samples))
+            shortened, duration = main.shorten_voice_pauses(source, len(samples) / rate)
+            self.assertNotEqual(shortened, source)
+            self.assertAlmostEqual(duration, 2.3, delta=0.03)
+            with wave.open(str(shortened), "rb") as wav:
+                output = wav.readframes(wav.getnframes())
+            self.assertEqual(output[:rate * 2], struct.pack(f"<{rate}h", *tone))
+            self.assertEqual(output[-rate * 2:], struct.pack(f"<{rate}h", *tone))
+            self.assertTrue(source.is_file())
 
     def test_voice_mixes_with_video_audio(self):
         ffmpeg = main.ROOT / "bin" / ("ffmpeg.exe" if sys.platform == "win32" else "ffmpeg")
