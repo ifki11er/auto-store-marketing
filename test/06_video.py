@@ -23,15 +23,21 @@ if not manifest_path.exists() or read_json(manifest_path) != photo_manifest(imag
 prompt = plan["minimax_prompt"]
 video = output / "video.mp4"
 shots = plan["15초_스크립트"]
-if any(not isinstance(shot.get("자막"), str) for shot in shots):
-    raise SystemExit("자막 형식이 잘못되었습니다. 5번 테스트를 다시 실행하세요.")
+if any(not isinstance(shot.get("내레이션"), str) for shot in shots):
+    raise SystemExit("대사 형식이 잘못되었습니다. 5번 테스트를 다시 실행하세요.")
 raw_video = output / "video_raw.mp4"
-voice = generate_qwen_batch([{"folder": output, "result": plan}]).get(str(output.resolve())) if qwen_tts_enabled() else None
-if qwen_tts_enabled() and (not voice or voice.get("error") or not voice.get("clips")):
+place = read_json(output / "place.json")
+job = {"folder": output, "result": plan}
+if qwen_tts_enabled():
+    job.update({"place": place, "reviews": read_json(output / "reviews.json"),
+                "analysis": (output / "analysis.txt").read_text(encoding="utf-8-sig"), "photos": images})
+voice = generate_qwen_batch([job], OpenAI()).get(str(output.resolve())) if qwen_tts_enabled() else None
+if qwen_tts_enabled() and (not voice or voice.get("error") or not voice.get("clips") or not voice.get("segments")):
     raise ValueError(voice.get("error", "Qwen 음성 결과가 없습니다") if voice else "Qwen 음성 결과가 없습니다")
+plan = job["result"]
+prompt, shots = plan["minimax_prompt"], plan["15초_스크립트"]
 reference = None if qwen_tts_enabled() else narration_reference(shots)
 prompt_id = generate_video_without_subtitles(OpenAI(), args.comfy_url, selected_photos(plan, images), prompt, raw_video, reference)
-place = read_json(output / "place.json")
-add_subtitles(raw_video, video, shots, place_name=place["place_name"], voice_clips=voice["clips"] if voice else None)
+add_subtitles(raw_video, video, shots, place_name=place["place_name"], voice_clips=voice["clips"] if voice else None, subtitle_segments=voice["segments"] if voice else None)
 record_process(place, video)
 print(f"완료: {video} (작업 ID: {prompt_id})")

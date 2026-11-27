@@ -298,8 +298,8 @@ def reference_photo_candidates(analysis, photos):
     return data, eligible
 
 
-def plan(client, place, reviews, analysis, photos, prior_concepts=None):
-    video_format = select_video_format()
+def plan(client, place, reviews, analysis, photos, prior_concepts=None, revision_feedback=None, requested_format=None):
+    video_format = requested_format or select_video_format()
     if os.environ.get("VIDEO_FORMAT", "").strip().lower() == "random":
         print(f"랜덤 선택 포맷: {video_format}", flush=True)
     instruction = build_planning_prompt(place.get("category_group_code"), video_format=video_format)
@@ -316,6 +316,8 @@ def plan(client, place, reviews, analysis, photos, prior_concepts=None):
                     "사진_목록": [{"분석_순번": i, "파일명": photo.name} for i, photo in enumerate(eligible_photos, 1)],
                     "MiniMax_가이드": (ROOT / "marketing" / "prompts" / "minimax_qwen_guide.md" if qwen_tts_enabled() else GUIDE).read_text(encoding="utf-8-sig")})
     base_input = "다음 자료를 바탕으로 JSON 객체를 작성하세요.\n" + json.dumps(payload, ensure_ascii=False)
+    if revision_feedback:
+        base_input += "\n이전 대본을 Qwen으로 읽은 결과: " + revision_feedback + " 핵심 매력과 흐름을 살리면서 15초 이내에 읽을 수 있도록 대본과 전체 기획을 다시 작성하세요."
     error = None
     last_result = None
     for attempt in range(3):
@@ -354,8 +356,7 @@ def plan(client, place, reviews, analysis, photos, prior_concepts=None):
     for shot in shots if isinstance(shots, list) else []:
         if isinstance(shot, dict):
             shot.pop("자막_스타일", None)
-            if isinstance(shot.get("내레이션"), str):
-                shot["자막"] = shot["내레이션"]
+            shot.pop("자막", None)
     result["분석_사진_목록"] = photo_manifest(photos)
     result["참조_가능_사진"] = [photo.name for photo in eligible_photos]
     selected_photos(result, photos)
@@ -375,7 +376,7 @@ def validate_video_caption_instructions(result):
     without_dialogue = re.sub(r"<d>.*?</d>", "", prompt, flags=re.DOTALL | re.IGNORECASE)
     shots = result.get("15초_스크립트")
     captions = [line.strip() for shot in shots if isinstance(shot, dict)
-                for line in (shot.get("자막") if isinstance(shot.get("자막"), str) else "").splitlines()
+                for line in (shot.get("내레이션") if isinstance(shot.get("내레이션"), str) else "").splitlines()
                 if len(line.strip()) >= 4] if isinstance(shots, list) else []
     for sentence in re.split(r"[.!?;\n]", without_dialogue):
         for caption in captions:
@@ -475,8 +476,6 @@ def validate_plan(result, photos):
         start, stop = float(shot["시작초"]), float(shot["종료초"])
         if start != end or stop <= start:
             raise ValueError("스크립트 시간이 연속적이지 않습니다")
-        if not isinstance(shot.get("자막"), str):
-            raise ValueError("자막은 문자열이어야 합니다. 자막이 없으면 빈 문자열을 사용하세요")
         narration = shot.get("내레이션")
         if not isinstance(narration, str) or re.search(r"[0-9]", narration):
             raise ValueError("대사는 문자열이어야 하며 숫자는 실제 읽는 한글 발음으로 작성해야 합니다")
@@ -776,7 +775,7 @@ def wrap_title(title, font_path):
     return r"\N".join(lines)
 
 
-def add_subtitles(raw_video, output, shots, subtitle_name="subtitles.srt", place_name="", video_title="", voice_clips=None):
+def add_subtitles(raw_video, output, shots, subtitle_name="subtitles.srt", place_name="", video_title="", voice_clips=None, subtitle_segments=None):
     """기획 자막을 SRT와 ASS로 저장하고 장면별 스타일을 합성한다."""
     if voice_clips:
         ffprobe = ROOT / "bin" / ("ffprobe.exe" if os.name == "nt" else "ffprobe")
@@ -806,20 +805,31 @@ def add_subtitles(raw_video, output, shots, subtitle_name="subtitles.srt", place
         title = heading.strip().replace("\\", "＼").replace("{", "｛").replace("}", "｝").replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
         title = wrap_title(title, ROOT / "font" / "Jua-Regular.ttf")
         events.append(f"Dialogue: 0,{timestamp(0, True)},{timestamp(shots[-1]['종료초'], True)},Default,,0,0,0,,{{\\an8\\q2\\fs110\\c&H0080FF&}}{title}")
-    clips_by_start = {clip["start"]: clip for clip in voice_clips} if voice_clips else {}
-    for shot in shots:
-        text = shot["내레이션"].strip()
+    if voice_clips and subtitle_segments is None:
+        raise ValueError("Qwen 음성에 맞춘 Whisper 자막이 없습니다")
+    if subtitle_segments is not None:
+        subtitle_items = subtitle_segments
+    else:
+        subtitle_items = []
+        for shot in shots:
+            words = shot["내레이션"].split()
+            if not words:
+                continue
+            start, end = float(shot["시작초"]), float(shot["종료초"])
+            weights = [max(1, len(word)) for word in words]
+            total, elapsed = sum(weights), 0
+            for word, weight in zip(words, weights):
+                subtitle_items.append({"text": word, "start": start + (end - start) * elapsed / total,
+                                       "end": start + (end - start) * (elapsed + weight) / total})
+                elapsed += weight
+    for item in subtitle_items:
+        text = item["text"].strip()
         if not text:
             continue
-        start, end = shot["시작초"], shot["종료초"]
-        if voice_clips:
-            clip = clips_by_start.get(float(start))
-            if clip is None:
-                raise ValueError(f"{start}초 장면에 맞는 Qwen 음성이 없습니다")
-            start, end = clip["start"], clip["start"] + clip["duration"]
+        start, end = item["start"], item["end"]
         entries.append(f"{len(entries) + 1}\n{timestamp(start)} --> {timestamp(end)}\n{text}\n")
         text = text.replace("\\", "＼").replace("{", "｛").replace("}", "｝").replace("\r\n", "\n").replace("\n", r"\N")
-        tags = r"{\an5\fs54\c&HFFFFFF&}"
+        tags = r"{\an5\fs80\c&HFFFFFF&}"
         events.append(f"Dialogue: 0,{timestamp(start, True)},{timestamp(end, True)},Default,,0,0,0,,{tags}{text}")
     subtitles = output.parent / subtitle_name
     subtitles.write_text("\n".join(entries), encoding="utf-8-sig")
@@ -924,18 +934,82 @@ def next_result_publication(schedule, allocated):
     return (planned, False) if planned is not None else None
 
 
-def generate_qwen_batch(jobs):
+def generate_qwen_batch(jobs, client=None):
     if not jobs:
         return {}
     voice_python = Path.home() / "anaconda3" / "envs" / "ai_voice" / ("python.exe" if os.name == "nt" else "bin/python")
     python = os.environ.get("QWEN_TTS_PYTHON", "").strip() or (str(voice_python) if voice_python.is_file() else sys.executable)
     ref = Path(os.environ.get("QWEN_TTS_REFERENCE", "").strip() or ROOT / "res" / "kr_male_30_typecast_changsu.wav")
-    with tempfile.TemporaryDirectory() as temp_dir:
-        jobs_path = Path(temp_dir) / "qwen_voice_jobs.json"
-        write_json(jobs_path, [{"folder": str(job["folder"].resolve()), "shots": job["result"]["15초_스크립트"]} for job in jobs])
-        subprocess.run([python, str(ROOT / "marketing" / "qwen_voice_batch.py"), str(jobs_path), str(ref.resolve())], check=True)
-        results = json.loads(jobs_path.with_name("qwen_voice_results.json").read_text(encoding="utf-8"))
-    return {item["folder"]: item for item in results}
+    results, whisper_jobs = {}, []
+    child_env = os.environ.copy()
+    child_env["PYTHONIOENCODING"] = "utf-8"
+    worker = subprocess.Popen([python, "-u", str(ROOT / "marketing" / "qwen_voice_batch.py"), str(ref.resolve())],
+                              stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, encoding="utf-8", env=child_env)
+    try:
+        for job in jobs:
+            folder = job["folder"].resolve()
+            key = str(folder)
+            try:
+                candidate_number = 0
+                for attempt in range(1, 4):
+                    shots = job["result"]["15초_스크립트"]
+                    text = " ".join(shot["내레이션"].strip() for shot in shots if shot.get("내레이션", "").strip())
+                    if not text:
+                        raise ValueError("생성할 나레이션이 없습니다")
+                    while True:
+                        candidate_number += 1
+                        candidate = folder / f"06_narration_attempt_{candidate_number}.wav"
+                        if not candidate.exists():
+                            break
+                    worker.stdin.write(json.dumps({"text": text, "path": str(candidate)}, ensure_ascii=False) + "\n")
+                    worker.stdin.flush()
+                    line = worker.stdout.readline()
+                    if not line:
+                        raise RuntimeError("Qwen 음성 생성 프로세스가 종료되었습니다")
+                    voice = json.loads(line)
+                    if voice.get("error"):
+                        raise ValueError(voice["error"])
+                    duration = float(voice["duration"])
+                    if duration <= 15:
+                        path = folder / "06_narration.wav"
+                        shutil.copy2(candidate, path)
+                        whisper_jobs.append({"folder": key, "path": str(path), "text": text, "duration": duration,
+                                             "srt": str(folder / "06_subtitles.srt")})
+                        results[key] = {"folder": key, "clips": [{"path": str(path), "start": 0.0, "duration": duration}]}
+                        break
+                    if attempt == 3:
+                        raise ValueError(f"세 번 기획해도 음성이 15초를 초과합니다: {duration:.2f}초")
+                    print(f"음성 {duration:.2f}초: 15초 이내로 대본을 다시 기획합니다 ({attempt}/3)", flush=True)
+                    if not all(name in job for name in ("place", "reviews", "analysis", "photos")):
+                        raise ValueError("대본 재기획에 필요한 가게 정보, 후기, 사진 분석이 없습니다")
+                    replan_client = recorded_client(client or OpenAI(), folder, f"replan_{attempt + 1}", "05")
+                    result = plan(replan_client, job["place"], job["reviews"], job["analysis"], job["photos"],
+                                  revision_feedback=f"음성 길이가 {duration:.2f}초로 15초를 초과했습니다.", requested_format=job.get("format"))
+                    job["result"] = result
+                    write_json(folder / f"05_plan_attempt_{attempt + 1}.json", result)
+                    write_json(folder / "05_plan.json", result)
+                    write_json(folder / "05_marketing.json", {"가게": job["place"], "후기": job["reviews"], "사진_분석": job["analysis"], "기획": result})
+            except Exception as exc:
+                results[key] = {"folder": key, "error": str(exc)}
+    finally:
+        try:
+            worker.stdin.close()
+        except BrokenPipeError:
+            pass
+        worker.stdout.close()
+        worker.wait()
+    if whisper_jobs:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            jobs_path = Path(temp_dir) / "whisper_jobs.json"
+            write_json(jobs_path, whisper_jobs)
+            subprocess.run([python, str(ROOT / "marketing" / "wav_to_srt_batch.py"), str(jobs_path), str(ROOT / "bin")], check=True, env=child_env)
+            captions = json.loads(jobs_path.with_name("whisper_results.json").read_text(encoding="utf-8"))
+        for item in captions:
+            if item.get("error"):
+                results[item["folder"]] = item
+            else:
+                results[item["folder"]]["segments"] = item["segments"]
+    return results
 
 
 def main(argv=None, single=False):
@@ -1046,7 +1120,7 @@ def main(argv=None, single=False):
                         write_json(folder / "05_plan.json", result)
                         write_json(folder / "05_marketing.json", {"가게": place, "후기": reviews, "사진_분석": analysis, "기획": result})
                         prepared.append({"place": place, "place_id": place_id, "channel": channel,
-                                         "folder": folder, "photos": photos, "result": result})
+                                         "folder": folder, "photos": photos, "result": result, "reviews": reviews, "analysis": analysis})
                         if schedule:
                             pending_allocations[channel].append(next_result_publication(schedule, allocated)[0])
                         print(f"대본 준비 완료: {folder}", flush=True)
@@ -1062,7 +1136,7 @@ def main(argv=None, single=False):
             browser = None
             if qwen_tts_enabled():
                 print(f"대본 {len(prepared)}건 완료, Qwen 음성을 일괄 생성합니다", flush=True)
-                voices = generate_qwen_batch(prepared)
+                voices = generate_qwen_batch(prepared, client)
             else:
                 voices = {}
             for job in prepared:
@@ -1071,13 +1145,13 @@ def main(argv=None, single=False):
                 stage = "voice"
                 try:
                     voice = voices.get(str(folder.resolve())) if qwen_tts_enabled() else None
-                    if qwen_tts_enabled() and (not voice or voice.get("error") or not voice.get("clips")):
+                    if qwen_tts_enabled() and (not voice or voice.get("error") or not voice.get("clips") or not voice.get("segments")):
                         raise ValueError(voice.get("error", "Qwen 음성 결과가 없습니다") if voice else "Qwen 음성 결과가 없습니다")
                     stage = "video"
                     raw_video = folder / "06_video_raw.mp4"
                     reference = None if qwen_tts_enabled() else narration_reference(result["15초_스크립트"])
                     generate_video_without_subtitles(client, args.comfy_url, selected_photos(result, job["photos"]), result["minimax_prompt"], raw_video, reference, args.workflow)
-                    add_subtitles(raw_video, folder / "video.mp4", result["15초_스크립트"], subtitle_name="06_subtitles.srt", place_name=place["place_name"], voice_clips=voice["clips"] if voice else None)
+                    add_subtitles(raw_video, folder / "video.mp4", result["15초_스크립트"], subtitle_name="06_subtitles.srt", place_name=place["place_name"], voice_clips=voice["clips"] if voice else None, subtitle_segments=voice["segments"] if voice else None)
                     stage = "save"
                     publication = next_result_publication(schedule, allocations[channel]) if schedule else None
                     destination = result_folder(args.output, place_id, publication, datetime.now(KOREA_TIME))

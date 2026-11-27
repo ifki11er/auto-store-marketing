@@ -99,7 +99,7 @@ def main():
                             summary = str(result.get("스토리_요약", ""))
                         prior_concepts.append({"포맷": video_format, "핵심_상황과_전개": summary.strip()[:80]})
                         if GENERATE_VIDEO:
-                            prepared.append({"folder": folder, "result": result, "photos": format_photos, "format": video_format})
+                            prepared.append({"folder": folder, "result": result, "photos": format_photos, "format": video_format, "place": place, "reviews": reviews, "analysis": analysis})
                         statuses.append({"포맷": video_format, "상태": "완료", "영상_생성": GENERATE_VIDEO, "폴더": str(folder)})
                         print(f"완료: {folder}", flush=True)
                     except Exception as exc:
@@ -108,17 +108,17 @@ def main():
                         print(f"{video_format} 실패: {exc}", flush=True)
                     write_json(run_folder / "결과.json", statuses)
                 if prepared:
-                    voices = generate_qwen_batch(prepared) if qwen_tts_enabled() else {}
+                    voices = generate_qwen_batch(prepared, client) if qwen_tts_enabled() else {}
                     for job in prepared:
                         folder, result = job["folder"], job["result"]
                         try:
                             voice = voices.get(str(folder.resolve()))
-                            if qwen_tts_enabled() and (not voice or voice.get("error") or not voice.get("clips")):
+                            if qwen_tts_enabled() and (not voice or voice.get("error") or not voice.get("clips") or not voice.get("segments")):
                                 raise ValueError(voice.get("error", "Qwen 음성 결과가 없습니다") if voice else "Qwen 음성 결과가 없습니다")
                             raw = folder / "06_video_raw.mp4"
                             reference = None if qwen_tts_enabled() else narration_reference(result["15초_스크립트"])
                             generate_video_without_subtitles(client, COMFY_URL, selected_photos(result, job["photos"]), result["minimax_prompt"], raw, reference)
-                            add_subtitles(raw, folder / "video.mp4", result["15초_스크립트"], subtitle_name="06_subtitles.srt", place_name=place["place_name"], voice_clips=voice["clips"] if voice else None)
+                            add_subtitles(raw, folder / "video.mp4", result["15초_스크립트"], subtitle_name="06_subtitles.srt", place_name=place["place_name"], voice_clips=voice["clips"] if voice else None, subtitle_segments=voice["segments"] if voice else None)
                             record_process(place, folder / "video.mp4")
                         except Exception as exc:
                             (folder / "오류.txt").write_text(traceback.format_exc(), encoding="utf-8")
