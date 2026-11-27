@@ -18,7 +18,7 @@ from datetime import timedelta
 
 import requests
 from openai import OpenAI
-from fasion.prompts import analysis_prompt, planning_prompt
+from fasion.prompts import CAMERAS, LOCATIONS, analysis_prompt, minimax_prompt, planning_prompt
 from fasion.locale_settings import selected_locales
 from marketing.token_usage import record_token_usage
 from marketing.upload_schedule import UploadSchedule
@@ -173,6 +173,7 @@ def save_history(history, brand, category, products, job, country):
         entry = {
             "brand": brand, "country": country, "category": category, "name": product["name"],
             "price": product["price"], "image": product["image"], "video": str(job / "07_final.mp4"),
+            "scene": product.get("scene"),
             "created_at": datetime.now().isoformat(timespec="seconds"),
         }
         history[product_key(brand, product["image"], country)] = entry
@@ -187,12 +188,24 @@ def write_history(history):
     temporary.replace(HISTORY)
 
 
-def select_products(client, category, count, history, job, country):
+def select_products(client, category, count, history, job, country, seconds):
     with (category / "products.csv").open(encoding="utf-8-sig", newline="") as file:
         candidates = list(csv.DictReader(file))
     random.shuffle(candidates)
     chosen = []
     selected_keys = set()
+    recent = []
+    seen = set()
+    for entry in reversed(list(history.values())):
+        if not isinstance(entry, dict) or not isinstance(entry.get("scene"), dict):
+            continue
+        marker = (entry.get("video"), entry.get("image"))
+        if marker in seen:
+            continue
+        seen.add(marker)
+        recent.append({"location": entry["scene"].get("location"), "camera": entry["scene"].get("camera")})
+        if len(recent) >= 6:
+            break
     attempts = 0
     for item in candidates:
         path = (category / item.get("image", "")).resolve()
@@ -219,13 +232,21 @@ def select_products(client, category, count, history, job, country):
         reference = prepare_clothing_image(path, job)
         (job / f"01_gpt_analysis_{attempts:03d}_product.json").write_text(
             json.dumps({"name": item.get("name", ""), "image": str(path)}, ensure_ascii=False, indent=2), encoding="utf-8")
-        result = ask(client, [{"type": "input_text", "text": analysis_prompt() + "\n판매 상품명: " + item.get("name", "")}, image_input(reference)], job, f"01_gpt_analysis_{attempts:03d}")
+        context = {"product_name": item.get("name", ""), "seconds": seconds, "recent_scenes": recent}
+        result = ask(client, [{"type": "input_text", "text": analysis_prompt() + "\n" + json.dumps(context, ensure_ascii=False)}, image_input(reference)], job, f"01_gpt_analysis_{attempts:03d}")
         if not isinstance(result.get("full_outfit"), bool) or not isinstance(result.get("outfit_description"), str) or not result["outfit_description"].strip():
             raise ValueError(f"GPT 착장 분석 결과에 판정 또는 설명이 없습니다: {path.name}")
         if result.get("full_outfit") is True:
+            location, camera, direction = result.get("location"), result.get("camera"), result.get("scene_prompt")
+            if location not in LOCATIONS or camera not in CAMERAS or not isinstance(direction, str) or not direction.strip() or len(direction) > 800 or "<" in direction or ">" in direction:
+                raise ValueError(f"GPT 장면 연출 정보가 올바르지 않습니다: {path.name}")
+            scene = {"location": location, "camera": camera, "scene_prompt": direction.strip()}
             chosen.append({"name": item.get("name", ""), "price": item.get("price", ""), "image": str(path),
                            "outfit_description": result["outfit_description"].strip(),
+                           "scene": scene,
                            "reference_image": str(reference.relative_to(job)) if reference != path else str(path)})
+            recent.insert(0, {"location": location, "camera": camera})
+            recent = recent[:6]
             selected_keys.add(group_key)
             if len(chosen) == count:
                 return chosen
@@ -276,7 +297,7 @@ def plan(client, brand, category, products, job, seconds, country, settings):
     return result
 
 
-def generate_clip(base, references, seconds, output, workflow_name):
+def generate_clip(base, references, seconds, output, workflow_name, scene):
     reference_node, prompt_node, prompt_field, output_node, output_field = WORKFLOWS[workflow_name]
     workflow = json.loads((ROOT / "workflow" / f"{workflow_name}.json").read_text(encoding="utf-8-sig"))
     inputs = workflow[reference_node]["inputs"]
@@ -294,7 +315,7 @@ def generate_clip(base, references, seconds, output, workflow_name):
     inputs["width"] = 640
     inputs["height"] = 640
     workflow["132"]["inputs"]["value"] = seconds
-    full_prompt = (ROOT / "fasion" / "prompts" / "minimax_fixed.md").read_text(encoding="utf-8-sig").strip()
+    full_prompt = minimax_prompt(scene, seconds)
     if len(full_prompt) > 5000:
         raise ValueError("고정 지시를 포함한 MiniMax 프롬프트가 5000자를 초과했습니다")
     (output.parent / f"04_minimax_prompt_{output.stem.removeprefix('04_raw_')}.txt").write_text(full_prompt, encoding="utf-8")
@@ -381,7 +402,7 @@ def main():
     if not os.environ.get("OPENAI_API_KEY"):
         raise ValueError("OPENAI_API_KEY가 필요합니다")
     face = configured_file("FASION_FACE")
-    stage = configured_file("FASION_STAGE")
+    stage = os.environ.get("FASION_STAGE", "").strip()
     bgm = configured_file("FASION_BGM")
     count = int(os.environ.get("FASION_CLOTHES_COUNT", "4"))
     seconds = int(os.environ.get("FASION_SECONDS_PER_CLOTHES", "5"))
@@ -426,13 +447,21 @@ def generate_one(client, categories, slot, face, stage, bgm, count, seconds, wor
     job = OUTPUT / "작업중" / datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     job.mkdir(parents=True)
     print(f"GPT 기록 저장 위치: {job}", flush=True)
-    products = select_products(client, category, count, history, job, country)
+    products = select_products(client, category, count, history, job, country, seconds)
     metadata = plan(client, brand, category.name, products, job, seconds, country, settings)
     (job / "03_metadata.json").write_text(json.dumps({**metadata, "brand": brand, "country": country, "currency": settings["currency"], "category": category.name, "products": products}, ensure_ascii=False, indent=2), encoding="utf-8")
     base = os.environ.get("COMFYUI_URL", "http://127.0.0.1:8188").strip().rstrip("/")
     for index, product in enumerate(products):
         print(f"런웨이 생성 중 ({index + 1}/{count}): {product['name']}", flush=True)
-        generate_clip(base, [face, stage, job / product["reference_image"]], seconds, job / f"04_raw_{index}.mp4", workflow_name)
+        scene = product["scene"]
+        if scene["location"] == "indoor_runway":
+            if not stage:
+                raise ValueError("실내 런웨이 장면에는 .env의 FASION_STAGE가 필요합니다")
+            references = [face, configured_file("FASION_STAGE"), job / product["reference_image"]]
+        else:
+            references = [face, job / product["reference_image"]]
+        print(f"장소: {scene['location']}, 카메라: {scene['camera']}", flush=True)
+        generate_clip(base, references, seconds, job / f"04_raw_{index}.mp4", workflow_name, scene)
     print("영상과 BGM 합성 중", flush=True)
     render(job, products, metadata["video_title"], bgm, seconds, metadata["display_names"], country)
     destination = OUTPUT / country / slot.strftime("%Y-%m-%d") / slot.strftime("%H%M") / job.name

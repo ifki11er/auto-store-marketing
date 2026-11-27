@@ -3,10 +3,41 @@ import json
 from pathlib import Path
 
 PROMPT_DIR = Path(__file__).resolve().parent / "prompts"
+LOCATIONS = {
+    "indoor_runway": "the fashion show runway and surroundings referenced from <Picture 2>",
+    "garden": "an outdoor garden suited to the garment",
+    "city_street": "a stylish city street suited to the garment",
+    "gallery": "an art gallery suited to the garment",
+    "rooftop": "a rooftop suited to the garment",
+    "pool": "a swimming pool suited to swimwear",
+}
+CAMERAS = {
+    "tracking_backward": "a smooth frontal backward tracking shot",
+    "side_tracking": "a smooth side tracking shot",
+    "diagonal_tracking": "a smooth diagonal tracking shot",
+    "static": "a fixed camera",
+    "slow_push_in": "a slow camera push-in",
+}
 
 
 def analysis_prompt():
     return (PROMPT_DIR / "analysis.md").read_text(encoding="utf-8-sig").strip()
+
+
+def minimax_prompt(scene, seconds):
+    indoor = scene["location"] == "indoor_runway"
+    replacements = {
+        "{{LOCATION_DEFINITION}}": LOCATIONS[scene["location"]],
+        "{{GARMENT_PICTURE}}": "<Picture 3>" if indoor else "<Picture 2>",
+        "{{LOCATION_RETENTION}}": "<Subject 2>: fully_preserved - retain the runway setting, layout and visual character from <Picture 2>." if indoor else "<Subject 2>: newly generated - create the selected setting without a location reference image.",
+        "{{CAMERA}}": CAMERAS[scene["camera"]],
+        "{{SCENE_DIRECTION}}": scene["scene_prompt"],
+        "{{SECONDS}}": str(seconds),
+    }
+    prompt = (PROMPT_DIR / "minimax_fixed.md").read_text(encoding="utf-8-sig").strip()
+    for token, value in replacements.items():
+        prompt = prompt.replace(token, value)
+    return prompt
 
 
 def planning_prompt(brand, category, products, seconds, language, country):
