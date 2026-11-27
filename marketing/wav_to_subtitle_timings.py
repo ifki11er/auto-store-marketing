@@ -111,9 +111,8 @@ def align_transcript(script, chunks, duration):
 
 def main():
     os.environ["PATH"] = str(Path(sys.argv[1])) + os.pathsep + os.environ.get("PATH", "")
-    # Qwen과 동시에 상주할 때 GPU 메모리 충돌을 피한다.
     with contextlib.redirect_stdout(sys.stderr):
-        transcriber = pipeline("automatic-speech-recognition", model="openai/whisper-small", device=-1)
+        transcriber = pipeline("automatic-speech-recognition", model="openai/whisper-small", device=0)
     for line in sys.stdin:
         try:
             job = json.loads(line)
