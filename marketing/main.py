@@ -633,6 +633,61 @@ def generate_video(base, photos, prompt, output, reference_audio=None, workflow_
     raise TimeoutError(f"ComfyUI 작업 대기 시간 초과: {prompt_id}")
 
 
+def check_generated_subtitles(client, raw_video):
+    """원본 영상의 3초 간격 화면에서 생성된 자막을 확인한다."""
+    ffmpeg = ROOT / "bin" / ("ffmpeg.exe" if os.name == "nt" else "ffmpeg")
+    if not ffmpeg.is_file():
+        raise FileNotFoundError(f"FFmpeg 실행 파일이 없습니다: {ffmpeg}")
+    with tempfile.TemporaryDirectory() as temp_dir:
+        pattern = str(Path(temp_dir) / "frame_%02d.jpg")
+        subprocess.run([str(ffmpeg), "-loglevel", "error", "-i", str(raw_video.resolve()),
+                        "-vf", "fps=1/3,scale=-2:768", "-frames:v", "5", "-q:v", "3", pattern], check=True)
+        frames = sorted(Path(temp_dir).glob("frame_*.jpg"))
+        if len(frames) != 5:
+            raise ValueError(f"자막 검수 화면이 5장이어야 합니다: {len(frames)}장")
+        content = [{"type": "input_text", "text": (
+            "다음은 자막 합성 전 15초 영상에서 3초 간격으로 추출한 화면입니다. "
+            "영상 위에 생성된 대사 자막, 설명 자막 또는 제목이 한 화면이라도 있는지 확인하세요. "
+            "매장 간판, 메뉴판, 제품 포장이나 화면 속 물체에 원래 속한 글자와 워터마크는 자막이 아닙니다. "
+            "화면에 덧씌운 문구와 실제 사물의 글자를 구분하고, 확실하지 않으면 불확실로 판정하세요. "
+            "JSON 객체만 반환하세요: 판정은 '있음', '없음', '불확실' 중 하나, 이유는 간결한 문자열."
+        )}]
+        for index, frame in enumerate(frames):
+            content.append({"type": "input_text", "text": f"화면 {index + 1} (약 {index * 3 + 1.5:.1f}초)"})
+            data = base64.b64encode(frame.read_bytes()).decode("ascii")
+            content.append({"type": "input_image", "image_url": f"data:image/jpeg;base64,{data}", "detail": "high"})
+        response = client.responses.create(model="gpt-6-luna", input=[{"role": "user", "content": content}],
+                                           text={"format": {"type": "json_object"}})
+    try:
+        result = json.loads(output_text(response))
+        if not isinstance(result, dict) or result.get("판정") not in ("있음", "없음", "불확실") or not isinstance(result.get("이유"), str):
+            raise ValueError("올바르지 않은 판정")
+    except (ValueError, TypeError) as exc:
+        raise ValueError("영상 자막 검수 응답이 올바르지 않습니다") from exc
+    return result
+
+
+def generate_video_without_subtitles(client, base, photos, prompt, output, reference_audio=None, workflow_name=None):
+    """자막이 감지되면 재생성하고 통과한 원본만 다음 단계로 전달한다."""
+    inspection_client = recorded_client(client, output.parent, "subtitle_check", "06")
+    candidate_number = 0
+    for attempt in range(1, 4):
+        while True:
+            candidate_number += 1
+            candidate = output.with_name(f"{output.stem}_attempt_{candidate_number}{output.suffix}")
+            if not candidate.exists():
+                break
+        prompt_id = generate_video(base, photos, prompt, candidate, reference_audio, workflow_name)
+        result = check_generated_subtitles(inspection_client, candidate)
+        print(f"영상 자막 검수 ({attempt}/3): {result['판정']} - {result['이유']}", flush=True)
+        if result["판정"] == "없음":
+            shutil.copy2(candidate, output)
+            return prompt_id
+        if result["판정"] == "불확실":
+            raise ValueError(f"영상 자막 검수 결과가 불확실합니다: {result['이유']}")
+    raise ValueError("영상 세 번 모두 생성 자막이 감지되어 자막 합성을 중단합니다")
+
+
 def wrap_title(title, font_path):
     """기존 TrueType 폰트의 글자 폭으로 제목 줄을 나눈다."""
     data = font_path.read_bytes()
@@ -795,7 +850,7 @@ def recorded_client(client, folder, stage, number):
     def create(**kwargs):
         nonlocal attempts
         attempts += 1
-        suffix = f"_{attempts}" if stage == "plan" and attempts > 1 else ""
+        suffix = f"_{attempts}" if stage in ("plan", "subtitle_check") and attempts > 1 else ""
         write_json(folder / f"{number}_gpt_{stage}_request{suffix}.json", kwargs)
         response = client.responses.create(**kwargs)
         record_token_usage(folder, stage, response)
@@ -933,7 +988,7 @@ def main(argv=None, single=False):
                         stage = "video"
                         reference_audio = narration_reference(result["15초_스크립트"])
                         raw_video = folder / "06_video_raw.mp4"
-                        generate_video(args.comfy_url, selected_photos(result, photos), result["minimax_prompt"], raw_video, reference_audio, args.workflow)
+                        generate_video_without_subtitles(client, args.comfy_url, selected_photos(result, photos), result["minimax_prompt"], raw_video, reference_audio, args.workflow)
                         add_subtitles(raw_video, folder / "video.mp4", result["15초_스크립트"], subtitle_name="06_subtitles.srt", place_name=place["place_name"])
                         stage = "save"
                         publication = next_result_publication(schedule, allocated) if schedule else None

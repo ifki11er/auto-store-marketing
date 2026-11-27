@@ -2,9 +2,10 @@
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from openai import OpenAI
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from marketing.main import add_subtitles, generate_video, narration_reference, photo_manifest, selected_photos
+from marketing.main import add_subtitles, generate_video_without_subtitles, narration_reference, photo_manifest, selected_photos
 from marketing.process_log import record_process
 from test.common import folder, photos, read_json
 
@@ -26,7 +27,7 @@ if any(not isinstance(shot.get("자막"), str) for shot in shots):
     raise SystemExit("자막 형식이 잘못되었습니다. 5번 테스트를 다시 실행하세요.")
 raw_video = output / "video_raw.mp4"
 reference_audio = narration_reference(shots)
-prompt_id = generate_video(args.comfy_url, selected_photos(plan, images), prompt, raw_video, reference_audio)
+prompt_id = generate_video_without_subtitles(OpenAI(), args.comfy_url, selected_photos(plan, images), prompt, raw_video, reference_audio)
 place = read_json(output / "place.json")
 add_subtitles(raw_video, video, shots, place_name=place["place_name"])
 record_process(place, video)

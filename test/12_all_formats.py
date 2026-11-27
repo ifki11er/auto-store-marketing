@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from openai import OpenAI
 from playwright.sync_api import sync_playwright
 from marketing.main import (
-    ROOT, add_subtitles, analyze, generate_video, narration_reference,
+    ROOT, add_subtitles, analyze, generate_video_without_subtitles, narration_reference,
     photo_manifest, photos_for, place_availability, plan, recorded_client,
     reviews_for, selected_photos, write_json,
 )
@@ -100,7 +100,7 @@ def main():
                         if GENERATE_VIDEO:
                             reference = narration_reference(result["15초_스크립트"])
                             raw = folder / "06_video_raw.mp4"
-                            generate_video(COMFY_URL, selected_photos(result, format_photos), result["minimax_prompt"], raw, reference)
+                            generate_video_without_subtitles(client, COMFY_URL, selected_photos(result, format_photos), result["minimax_prompt"], raw, reference)
                             add_subtitles(raw, folder / "video.mp4", result["15초_스크립트"], subtitle_name="06_subtitles.srt", place_name=place["place_name"])
                             record_process(place, folder / "video.mp4")
                         statuses.append({"포맷": video_format, "상태": "완료", "영상_생성": GENERATE_VIDEO, "폴더": str(folder)})
