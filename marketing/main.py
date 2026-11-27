@@ -28,7 +28,7 @@ from marketing.output_schedule import folder_allocations
 from marketing.process_log import record_process
 from marketing.token_usage import record_token_usage
 from marketing.upload_schedule import KOREA_TIME, UploadSchedule
-from marketing.prompts import build_planning_prompt, select_video_format
+from marketing.prompts import build_planning_prompt, qwen_tts_enabled, select_video_format
 
 ROOT = Path(__file__).resolve().parent.parent
 WORKFLOW = ROOT / "workflow" / "Deno_MiniMax_H3_R2V_Turbo_8plus2.json"
@@ -314,7 +314,7 @@ def plan(client, place, reviews, analysis, photos, prior_concepts=None):
             payload["이전에_기획한_콘셉트"] = prior_concepts
     payload.update({"사진_선택용_상세정보": details,
                     "사진_목록": [{"분석_순번": i, "파일명": photo.name} for i, photo in enumerate(eligible_photos, 1)],
-                    "MiniMax_가이드": GUIDE.read_text(encoding="utf-8-sig")})
+                    "MiniMax_가이드": (ROOT / "marketing" / "prompts" / "minimax_qwen_guide.md" if qwen_tts_enabled() else GUIDE).read_text(encoding="utf-8-sig")})
     base_input = "다음 자료를 바탕으로 JSON 객체를 작성하세요.\n" + json.dumps(payload, ensure_ascii=False)
     error = None
     last_result = None
@@ -338,8 +338,11 @@ def plan(client, place, reviews, analysis, photos, prior_concepts=None):
         if last_result is None:
             raise ValueError("세 번의 기획 응답 모두 사용할 수 있는 JSON 객체가 아닙니다") from error
         validate_video_caption_instructions(last_result)
-        validate_narration_voice(last_result)
-        validate_dialogue_format(last_result)
+        if qwen_tts_enabled():
+            validate_silent_video_prompt(last_result)
+        else:
+            validate_narration_voice(last_result)
+            validate_dialogue_format(last_result)
         last_shots = last_result.get("15초_스크립트")
         if isinstance(last_shots, list) and any(reports_reference_material(shot.get("내레이션", "")) for shot in last_shots if isinstance(shot, dict)):
             raise ValueError("대사에 후기나 사진을 분석하는 표현이 남아 있습니다") from error
@@ -351,6 +354,8 @@ def plan(client, place, reviews, analysis, photos, prior_concepts=None):
     for shot in shots if isinstance(shots, list) else []:
         if isinstance(shot, dict):
             shot.pop("자막_스타일", None)
+            if isinstance(shot.get("내레이션"), str):
+                shot["자막"] = shot["내레이션"]
     result["분석_사진_목록"] = photo_manifest(photos)
     result["참조_가능_사진"] = [photo.name for photo in eligible_photos]
     selected_photos(result, photos)
@@ -445,9 +450,18 @@ def validate_dialogue_format(result):
         previous_end = match.end()
 
 
+def validate_silent_video_prompt(result):
+    prompt = result.get("minimax_prompt")
+    if not isinstance(prompt, str) or re.search(r"<\s*/?\s*d\s*>|<Audio\s+\d+>", prompt, re.IGNORECASE):
+        raise ValueError("영상 생성 프롬프트에는 음성 참조나 대사를 넣을 수 없습니다")
+
+
 def validate_plan(result, photos):
     validate_video_caption_instructions(result)
-    validate_narration_voice(result)
+    if qwen_tts_enabled():
+        validate_silent_video_prompt(result)
+    else:
+        validate_narration_voice(result)
     if not isinstance(result.get("영상_형태"), str) or not result["영상_형태"].strip():
         raise ValueError("기획 결과에 영상 형태가 없습니다")
     for key in ("영상_컨셉", "스토리_요약", "기획_차별점", "핵심_메시지", "시청자_반응", "결말_의미"):
@@ -468,8 +482,8 @@ def validate_plan(result, photos):
             raise ValueError("대사는 문자열이어야 하며 숫자는 실제 읽는 한글 발음으로 작성해야 합니다")
         if reports_reference_material(narration):
             raise ValueError("대사에서 후기나 사진을 분석한 과정을 보고하지 말고 가게의 매력을 자연스럽게 소개하세요")
-        if shot.get("발화_유형") not in ("나레이션", "화면발화", "없음"):
-            raise ValueError("각 장면의 발화_유형은 나레이션, 화면발화, 없음 중 하나여야 합니다")
+        if shot.get("발화_유형") not in (("나레이션", "없음") if qwen_tts_enabled() else ("나레이션", "화면발화", "없음")):
+            raise ValueError("발화_유형이 선택한 음성 방식에 맞지 않습니다")
         if bool(narration.strip()) != (shot["발화_유형"] != "없음"):
             raise ValueError("발화 유형과 대사 유무가 일치하지 않습니다")
         if shot["발화_유형"] == "나레이션":
@@ -501,7 +515,8 @@ def validate_plan(result, photos):
         voice = voices_by_id.get(shot.get("화자_ID"))
         if voice is None:
             raise ValueError("대사가 있는 장면에 음성_연출의 화자_ID가 필요합니다")
-    validate_dialogue_format(result)
+    if not qwen_tts_enabled():
+        validate_dialogue_format(result)
     selected = result.get("선택_사진")
     available = {photo.name for photo in photos}
     if not isinstance(selected, list) or not 1 <= len(selected) <= 9:
@@ -592,7 +607,8 @@ def generate_video(base, photos, prompt, output, reference_audio=None, workflow_
         node_id = str(9000 + len(photos))
         workflow[node_id] = {"class_type": "LoadAudio", "inputs": {"audio": name}}
         inputs["ref_audios.ref_audio_0"] = [node_id, 0]
-    workflow[prompt_node]["inputs"][prompt_field] = prompt + "\nDo not generate subtitles, captions, titles, or other added on-screen text. Preserve existing lettering in reference images."
+    no_speech = "No human speech, narration, singing, voices, vocal sounds or spoken words. Instrumental music and non-vocal sound effects only. " if qwen_tts_enabled() else ""
+    workflow[prompt_node]["inputs"][prompt_field] = prompt + "\n" + no_speech + "Do not generate subtitles, captions, titles, or other added on-screen text. Preserve existing lettering in reference images."
     workflow["132"]["inputs"]["value"] = 15
     # Submit only nodes reachable from the video output, removing sample assets.
     needed = set()
@@ -760,8 +776,16 @@ def wrap_title(title, font_path):
     return r"\N".join(lines)
 
 
-def add_subtitles(raw_video, output, shots, subtitle_name="subtitles.srt", place_name="", video_title=""):
+def add_subtitles(raw_video, output, shots, subtitle_name="subtitles.srt", place_name="", video_title="", voice_clips=None):
     """기획 자막을 SRT와 ASS로 저장하고 장면별 스타일을 합성한다."""
+    if voice_clips:
+        ffprobe = ROOT / "bin" / ("ffprobe.exe" if os.name == "nt" else "ffprobe")
+        if not ffprobe.is_file():
+            raise FileNotFoundError(f"FFprobe 실행 파일이 없습니다: {ffprobe}")
+        duration = float(subprocess.check_output([str(ffprobe), "-v", "error", "-show_entries", "format=duration",
+                                                  "-of", "default=noprint_wrappers=1:nokey=1", str(raw_video.resolve())], text=True).strip())
+        if any(clip["start"] + clip["duration"] > duration + 0.01 for clip in voice_clips):
+            raise ValueError(f"Qwen 음성이 원본 영상 길이 {duration:.2f}초를 초과합니다")
     watermark_setting = os.environ.get("WATERMARK_ENABLED", "true").strip().lower()
     if watermark_setting not in ("true", "false"):
         raise ValueError("WATERMARK_ENABLED는 true 또는 false로 설정하세요")
@@ -782,11 +806,17 @@ def add_subtitles(raw_video, output, shots, subtitle_name="subtitles.srt", place
         title = heading.strip().replace("\\", "＼").replace("{", "｛").replace("}", "｝").replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
         title = wrap_title(title, ROOT / "font" / "Jua-Regular.ttf")
         events.append(f"Dialogue: 0,{timestamp(0, True)},{timestamp(shots[-1]['종료초'], True)},Default,,0,0,0,,{{\\an8\\q2\\fs110\\c&H0080FF&}}{title}")
+    clips_by_start = {clip["start"]: clip for clip in voice_clips} if voice_clips else {}
     for shot in shots:
-        text = shot["자막"].strip()
+        text = shot["내레이션"].strip()
         if not text:
             continue
         start, end = shot["시작초"], shot["종료초"]
+        if voice_clips:
+            clip = clips_by_start.get(float(start))
+            if clip is None:
+                raise ValueError(f"{start}초 장면에 맞는 Qwen 음성이 없습니다")
+            start, end = clip["start"], clip["start"] + clip["duration"]
         entries.append(f"{len(entries) + 1}\n{timestamp(start)} --> {timestamp(end)}\n{text}\n")
         text = text.replace("\\", "＼").replace("{", "｛").replace("}", "｝").replace("\r\n", "\n").replace("\n", r"\N")
         tags = r"{\an5\fs54\c&HFFFFFF&}"
@@ -834,8 +864,22 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         else:
             filters = video_filter
             video_map = "[base]"
-        command += ["-filter_complex", filters, "-map", video_map, "-map", "0:a?",
-                    "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18", "-c:a", "copy",
+        if voice_clips:
+            offset = 2 if watermark_enabled else 1
+            for clip in voice_clips:
+                command += ["-i", clip["path"]]
+            audio_filters = ["[0:a]volume=0.55[bgm]"]
+            for index, clip in enumerate(voice_clips):
+                delay = round(clip["start"] * 1000)
+                audio_filters.append(f"[{offset + index}:a]adelay={delay}:all=1[voice{index}]")
+            inputs = "[bgm]" + "".join(f"[voice{index}]" for index in range(len(voice_clips)))
+            audio_filters.append(f"{inputs}amix=inputs={len(voice_clips) + 1}:duration=first:normalize=0[aout]")
+            filters += ";" + ";".join(audio_filters)
+            audio_map, audio_codec = "[aout]", "aac"
+        else:
+            audio_map, audio_codec = "0:a?", "copy"
+        command += ["-filter_complex", filters, "-map", video_map, "-map", audio_map,
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18", "-c:a", audio_codec,
                     str(output.resolve())]
         subprocess.run(command, cwd=temp_dir, check=True)
 
@@ -880,6 +924,20 @@ def next_result_publication(schedule, allocated):
     return (planned, False) if planned is not None else None
 
 
+def generate_qwen_batch(jobs):
+    if not jobs:
+        return {}
+    voice_python = Path.home() / "anaconda3" / "envs" / "ai_voice" / ("python.exe" if os.name == "nt" else "bin/python")
+    python = os.environ.get("QWEN_TTS_PYTHON", "").strip() or (str(voice_python) if voice_python.is_file() else sys.executable)
+    ref = Path(os.environ.get("QWEN_TTS_REFERENCE", "").strip() or ROOT / "res" / "kr_male_30_typecast_changsu.wav")
+    with tempfile.TemporaryDirectory() as temp_dir:
+        jobs_path = Path(temp_dir) / "qwen_voice_jobs.json"
+        write_json(jobs_path, [{"folder": str(job["folder"].resolve()), "shots": job["result"]["15초_스크립트"]} for job in jobs])
+        subprocess.run([python, str(ROOT / "marketing" / "qwen_voice_batch.py"), str(jobs_path), str(ref.resolve())], check=True)
+        results = json.loads(jobs_path.with_name("qwen_voice_results.json").read_text(encoding="utf-8"))
+    return {item["folder"]: item for item in results}
+
+
 def main(argv=None, single=False):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db", type=Path, default=ROOT / "kakao_places_filtered.db")
@@ -910,11 +968,13 @@ def main(argv=None, single=False):
             groups = iter_region_place_iterators(db, args.after_id)
         browser = playwright.chromium.launch(headless=True)
         completed_paths = []
+        prepared = []
+        pending_allocations = {channel: list(allocations[channel]) for channel in CHANNEL_ORDER}
         try:
             completed = 0
             for rows in groups:
                 if schedule and all(next_result_publication(schedule,
-                    allocations[channel]) is None
+                    pending_allocations[channel]) is None
                     for channel in CHANNEL_ORDER):
                     print("모든 지역의 공개 기간 일정이 완료되었습니다", flush=True)
                     break
@@ -946,7 +1006,7 @@ def main(argv=None, single=False):
                                 history.set_failure(place_id, "invalid region")
                                 print(f"지역 채널 없음: {place_id} 건너뜀", flush=True)
                                 continue
-                            allocated = allocations[channel]
+                            allocated = pending_allocations[channel]
                             if next_result_publication(schedule, allocated) is None:
                                 break
                         completed_videos = (args.output / place_id / "video.mp4", ROOT / "test" / "results" / place_id / "video.mp4")
@@ -985,43 +1045,68 @@ def main(argv=None, single=False):
                         result = plan(recorded_client(client, folder, "plan", "05"), place, reviews, analysis, photos)
                         write_json(folder / "05_plan.json", result)
                         write_json(folder / "05_marketing.json", {"가게": place, "후기": reviews, "사진_분석": analysis, "기획": result})
-                        stage = "video"
-                        reference_audio = narration_reference(result["15초_스크립트"])
-                        raw_video = folder / "06_video_raw.mp4"
-                        generate_video_without_subtitles(client, args.comfy_url, selected_photos(result, photos), result["minimax_prompt"], raw_video, reference_audio, args.workflow)
-                        add_subtitles(raw_video, folder / "video.mp4", result["15초_스크립트"], subtitle_name="06_subtitles.srt", place_name=place["place_name"])
-                        stage = "save"
-                        publication = next_result_publication(schedule, allocated) if schedule else None
-                        destination = result_folder(args.output, place_id, publication, datetime.now(KOREA_TIME))
-                        destination.parent.mkdir(parents=True, exist_ok=True)
-                        if destination.exists():
-                            raise FileExistsError(f"결과 폴더가 이미 있습니다. 생성된 결과는 {folder}에 보관했습니다: {destination}")
-                        staging_parent = folder.parent
-                        folder.rename(destination)
-                        for path in (staging_parent, staging_parent.parent):
-                            try:
-                                path.rmdir()
-                            except OSError:
-                                pass
-                        folder = destination
-                        history.add(place_id, channel, publication[0] if publication else None)
-                        if publication:
-                            allocations[channel].append(publication[0])
-                        record_process(place, folder / "video.mp4", publication[0] if publication else None)
-                        completed_paths.append(folder)
-                        print(f"완료: {folder}", flush=True)
-                        completed += 1
-                        if single:
-                            return
+                        prepared.append({"place": place, "place_id": place_id, "channel": channel,
+                                         "folder": folder, "photos": photos, "result": result})
+                        if schedule:
+                            pending_allocations[channel].append(next_result_publication(schedule, allocated)[0])
+                        print(f"대본 준비 완료: {folder}", flush=True)
                         break
                     except Exception as exc:
                         reason = failure_reason(exc, stage)
                         history.set_failure(place_id, reason)
                         print(f"가게 처리 실패: {place_id} ({reason}: {exc})", file=sys.stderr, flush=True)
                         continue
+                if single and prepared:
+                    break
+            browser.close()
+            browser = None
+            if qwen_tts_enabled():
+                print(f"대본 {len(prepared)}건 완료, Qwen 음성을 일괄 생성합니다", flush=True)
+                voices = generate_qwen_batch(prepared)
+            else:
+                voices = {}
+            for job in prepared:
+                place, place_id, channel = job["place"], job["place_id"], job["channel"]
+                folder, result = job["folder"], job["result"]
+                stage = "voice"
+                try:
+                    voice = voices.get(str(folder.resolve())) if qwen_tts_enabled() else None
+                    if qwen_tts_enabled() and (not voice or voice.get("error") or not voice.get("clips")):
+                        raise ValueError(voice.get("error", "Qwen 음성 결과가 없습니다") if voice else "Qwen 음성 결과가 없습니다")
+                    stage = "video"
+                    raw_video = folder / "06_video_raw.mp4"
+                    reference = None if qwen_tts_enabled() else narration_reference(result["15초_스크립트"])
+                    generate_video_without_subtitles(client, args.comfy_url, selected_photos(result, job["photos"]), result["minimax_prompt"], raw_video, reference, args.workflow)
+                    add_subtitles(raw_video, folder / "video.mp4", result["15초_스크립트"], subtitle_name="06_subtitles.srt", place_name=place["place_name"], voice_clips=voice["clips"] if voice else None)
+                    stage = "save"
+                    publication = next_result_publication(schedule, allocations[channel]) if schedule else None
+                    destination = result_folder(args.output, place_id, publication, datetime.now(KOREA_TIME))
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    if destination.exists():
+                        raise FileExistsError(f"결과 폴더가 이미 있습니다. 생성된 결과는 {folder}에 보관했습니다: {destination}")
+                    staging_parent = folder.parent
+                    folder.rename(destination)
+                    for path in (staging_parent, staging_parent.parent):
+                        try:
+                            path.rmdir()
+                        except OSError:
+                            pass
+                    folder = destination
+                    history.add(place_id, channel, publication[0] if publication else None)
+                    if publication:
+                        allocations[channel].append(publication[0])
+                    record_process(place, folder / "video.mp4", publication[0] if publication else None)
+                    completed_paths.append(folder)
+                    print(f"완료: {folder}", flush=True)
+                    completed += 1
+                except Exception as exc:
+                    reason = failure_reason(exc, stage)
+                    history.set_failure(place_id, reason)
+                    print(f"가게 처리 실패: {place_id} ({reason}: {exc})", file=sys.stderr, flush=True)
             print(f"처리 종료: {completed}개 가게 완료", flush=True)
         finally:
-            browser.close()
+            if browser is not None:
+                browser.close()
             print("완료 경로:", flush=True)
             for path in completed_paths:
                 print(f"- {path}", flush=True)

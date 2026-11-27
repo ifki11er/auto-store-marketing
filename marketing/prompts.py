@@ -29,8 +29,15 @@ def select_video_format():
     return video_format
 
 
+def qwen_tts_enabled():
+    value = os.environ.get("use_tts", "minimax").strip().lower()
+    if value not in ("minimax", "qwen3"):
+        raise ValueError("use_tts는 minimax 또는 qwen3로 설정하세요")
+    return value == "qwen3"
+
+
 def build_planning_prompt(category_group_code, video_format=None):
-    common = (PROMPT_DIR / "common.md").read_text(encoding="utf-8-sig")
+    common = (PROMPT_DIR / ("common_qwen.md" if qwen_tts_enabled() else "common.md")).read_text(encoding="utf-8-sig")
     if video_format is None:
         video_format = select_video_format()
     parts = [common]

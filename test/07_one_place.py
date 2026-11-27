@@ -9,7 +9,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from openai import OpenAI
 from playwright.sync_api import sync_playwright
-from marketing.main import (ROOT, NoUsableReferencePhotos, add_subtitles, analyze, failure_reason, generate_video_without_subtitles, narration_reference,
+from marketing.main import (ROOT, NoUsableReferencePhotos, add_subtitles, analyze, failure_reason, generate_qwen_batch, generate_video_without_subtitles, narration_reference, qwen_tts_enabled,
                             photo_manifest, photos_for, place_availability, plan, recorded_client,
                             reviews_for, selected_photos, write_json)
 from marketing.place_history import PlaceHistory
@@ -91,22 +91,40 @@ def process_place(place_id):
     record_failure(place_id, None)
     write_json(folder / "05_plan.json", result)
     write_json(folder / "05_marketing.json", {"가게": place, "후기": reviews, "사진_분석": analysis, "기획": result})
-    raw_video = folder / "06_video_raw.mp4"
-    generate_video_without_subtitles(client, COMFY_URL, selected_photos(result, photos), result["minimax_prompt"], raw_video,
-                   narration_reference(result["15초_스크립트"]))
-    add_subtitles(raw_video, folder / "video.mp4", result["15초_스크립트"],
-                  subtitle_name="06_subtitles.srt", place_name=place["place_name"],
-                  video_title=result.get("영상_상단_제목") or result.get("후킹", ""))
-    record_process(place, folder / "video.mp4")
-    print(f"완료: {folder}", flush=True)
+    return {"place": place, "place_id": place_id, "folder": folder, "photos": photos, "result": result}
 
 
 def main():
     if not PLACE_IDS or any(not isinstance(place_id, str) or not place_id.isdigit() for place_id in PLACE_IDS):
         raise ValueError("PLACE_IDS에 테스트할 가게 ID를 문자열 목록으로 입력하세요")
+    prepared = []
     for place_id in PLACE_IDS:
         try:
-            process_place(place_id)
+            job = process_place(place_id)
+            if job:
+                prepared.append(job)
+        except Exception as exc:
+            reason = failure_reason(exc, "test")
+            try:
+                record_failure(place_id, reason)
+            except Exception as db_exc:
+                print(f"실패 사유 저장 실패: {place_id} ({db_exc})", file=sys.stderr, flush=True)
+            print(f"가게 처리 실패: {place_id} ({reason}: {exc})", file=sys.stderr, flush=True)
+    voices = generate_qwen_batch(prepared) if qwen_tts_enabled() else {}
+    client = OpenAI()
+    for job in prepared:
+        place, place_id, folder, result = job["place"], job["place_id"], job["folder"], job["result"]
+        try:
+            voice = voices.get(str(folder.resolve()))
+            if qwen_tts_enabled() and (not voice or voice.get("error") or not voice.get("clips")):
+                raise ValueError(voice.get("error", "Qwen 음성 결과가 없습니다") if voice else "Qwen 음성 결과가 없습니다")
+            raw_video = folder / "06_video_raw.mp4"
+            reference = None if qwen_tts_enabled() else narration_reference(result["15초_스크립트"])
+            generate_video_without_subtitles(client, COMFY_URL, selected_photos(result, job["photos"]), result["minimax_prompt"], raw_video, reference)
+            add_subtitles(raw_video, folder / "video.mp4", result["15초_스크립트"],
+                          subtitle_name="06_subtitles.srt", place_name=place["place_name"], voice_clips=voice["clips"] if voice else None)
+            record_process(place, folder / "video.mp4")
+            print(f"완료: {folder}", flush=True)
         except Exception as exc:
             reason = failure_reason(exc, "test")
             try:
