@@ -118,7 +118,7 @@ def main():
                             raw = folder / "06_video_raw.mp4"
                             reference = None if qwen_tts_enabled() else narration_reference(result["15초_스크립트"])
                             generate_video_without_subtitles(client, COMFY_URL, selected_photos(result, job["photos"]), result["minimax_prompt"], raw, reference)
-                            add_subtitles(raw, folder / "video.mp4", result["15초_스크립트"], subtitle_name="06_subtitles.srt", place_name=place["place_name"], voice_clips=voice["clips"] if voice else None, subtitle_segments=voice["segments"] if voice else None)
+                            add_subtitles(raw, folder / "video.mp4", result["15초_스크립트"], subtitle_name="06_subtitles.ass", place_name=place["place_name"], voice_clips=voice["clips"] if voice else None, subtitle_segments=voice["segments"] if voice else None)
                             record_process(place, folder / "video.mp4")
                         except Exception as exc:
                             (folder / "오류.txt").write_text(traceback.format_exc(), encoding="utf-8")

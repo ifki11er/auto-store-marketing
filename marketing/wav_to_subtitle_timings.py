@@ -1,5 +1,6 @@
-"""Whisper로 생성된 WAV의 단어 시간을 구하고 원래 대본과 비교해 자막을 만든다."""
+"""Whisper로 생성된 WAV의 단어별 자막 시간을 구한다."""
 import json
+import contextlib
 import os
 import re
 import sys
@@ -7,7 +8,6 @@ import unicodedata
 from difflib import SequenceMatcher
 from pathlib import Path
 
-import torch
 from transformers import pipeline
 
 
@@ -15,12 +15,20 @@ def normalized(text):
     return "".join(c.lower() for c in unicodedata.normalize("NFC", text) if c.isalnum())
 
 
-def timestamp(value):
-    ms = round(value * 1000)
-    h, ms = divmod(ms, 3600000)
-    m, ms = divmod(ms, 60000)
-    s, ms = divmod(ms, 1000)
-    return f"{h:02}:{m:02}:{s:02},{ms:03}"
+def check_last_sentence(script, recognized):
+    """발화 끝부분이 대본의 마지막 문장과 대체로 일치하는지 확인한다."""
+    sentences = [part.strip() for part in re.split(r"[.!?。？！\n]+", script) if part.strip()]
+    expected = normalized(sentences[-1]) if sentences else ""
+    heard = normalized(recognized)
+    if not expected or not heard:
+        return {"complete": False, "expected": sentences[-1] if sentences else "", "recognized": recognized}
+    tail = heard[-max(len(expected) * 2, len(expected) + 8):]
+    matches = sum(block.size for block in SequenceMatcher(None, expected, tail, autojunk=False).get_matching_blocks())
+    ending = expected[-min(4, len(expected)):]
+    tail_end = heard[-max(len(ending) * 2, 8):]
+    ending_matches = sum(block.size for block in SequenceMatcher(None, ending, tail_end, autojunk=False).get_matching_blocks())
+    complete = matches / len(expected) >= 0.75 and ending_matches / len(ending) >= 0.75
+    return {"complete": complete, "expected": sentences[-1], "recognized": recognized}
 
 
 def align_transcript(script, chunks, duration):
@@ -79,34 +87,49 @@ def align_transcript(script, chunks, duration):
     for current, following in zip(entries, entries[1:]):
         if current["end"] > following["start"]:
             current["end"] = following["start"]
-    if any(item["end"] <= item["start"] for item in entries):
-        # 인식에서 단어가 통째로 빠지는 등 시간 추정이 불가능한 경우 전체 발화 시간에 배분한다.
-        start, stop = char_times[0][0], char_times[-1][1]
-        cursor = 0
-        for item in entries:
-            count = len(normalized(item["text"]))
-            item["start"] = start + (stop - start) * cursor / len(target)
-            cursor += count
-            item["end"] = start + (stop - start) * cursor / len(target)
+    index = 0
+    while index < len(entries):
+        if entries[index]["end"] > entries[index]["start"]:
+            index += 1
+            continue
+        first = index
+        while index < len(entries) and entries[index]["end"] <= entries[index]["start"]:
+            index += 1
+        left, right = max(0, first - 1), min(len(entries), index + 1)
+        start, stop = entries[left]["start"], entries[right - 1]["end"]
+        if stop <= start:
+            raise ValueError("Whisper 음성 시간으로 자막을 정렬할 수 없습니다")
+        weights = [len(normalized(item["text"])) for item in entries[left:right]]
+        total, elapsed = sum(weights), 0
+        for item, count in zip(entries[left:right], weights):
+            item["start"] = start + (stop - start) * elapsed / total
+            elapsed += count
+            item["end"] = start + (stop - start) * elapsed / total
+        index = right
     return entries
 
 
 def main():
-    jobs = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-    os.environ["PATH"] = str(Path(sys.argv[2])) + os.pathsep + os.environ.get("PATH", "")
-    device = 0 if torch.cuda.is_available() else -1
-    transcriber = pipeline("automatic-speech-recognition", model="openai/whisper-small", device=device)
-    results = []
-    for job in jobs:
+    os.environ["PATH"] = str(Path(sys.argv[1])) + os.pathsep + os.environ.get("PATH", "")
+    # Qwen과 동시에 상주할 때 GPU 메모리 충돌을 피한다.
+    with contextlib.redirect_stdout(sys.stderr):
+        transcriber = pipeline("automatic-speech-recognition", model="openai/whisper-small", device=-1)
+    for line in sys.stdin:
         try:
-            result = transcriber(job["path"], return_timestamps="word", generate_kwargs={"language": "ko"})
-            entries = align_transcript(job["text"], result["chunks"], job["duration"])
-            srt = "\n".join(f"{i}\n{timestamp(e['start'])} --> {timestamp(e['end'])}\n{e['text']}\n" for i, e in enumerate(entries, 1))
-            Path(job["srt"]).write_text(srt, encoding="utf-8-sig")
-            results.append({"folder": job["folder"], "segments": entries})
+            job = json.loads(line)
+            with contextlib.redirect_stdout(sys.stderr):
+                transcription = transcriber(job["path"], return_timestamps="word", generate_kwargs={"language": "ko"})
+            chunks = transcription.get("chunks") or []
+            recognized = "".join(chunk.get("text", "") for chunk in chunks)
+            if not normalized(recognized):
+                raise ValueError("Whisper가 음성을 인식하지 못해 마지막 문장을 확인할 수 없습니다")
+            check = check_last_sentence(job["text"], recognized)
+            result = {"check": check}
+            if check["complete"]:
+                result["segments"] = align_transcript(job["text"], chunks, job["duration"])
         except Exception as exc:
-            results.append({"folder": job["folder"], "error": str(exc)})
-    Path(sys.argv[1]).with_name("whisper_results.json").write_text(json.dumps(results, ensure_ascii=False), encoding="utf-8")
+            result = {"error": str(exc)}
+        print(json.dumps(result, ensure_ascii=False), flush=True)
 
 
 if __name__ == "__main__":

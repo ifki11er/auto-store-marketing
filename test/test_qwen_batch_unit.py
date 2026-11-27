@@ -40,6 +40,17 @@ class QwenBatchTests(unittest.TestCase):
             main.validate_video_caption_instructions({"15초_스크립트": [{"내레이션": "동해물과 백두산이"}],
                                                        "minimax_prompt": 'Display "동해물과 백두산이".'})
 
+    def test_qwen_does_not_limit_each_shot_by_unprocessed_speech_rate(self):
+        result = {key: "내용" for key in ("영상_형태", "영상_컨셉", "스토리_요약", "기획_차별점", "핵심_메시지", "시청자_반응", "결말_의미")}
+        result.update({"15초_스크립트": [
+            {"시작초": 0, "종료초": 3.9, "내레이션": "가" * 25, "발화_유형": "나레이션", "화자_ID": "S1"},
+            {"시작초": 3.9, "종료초": 15, "내레이션": "", "발화_유형": "없음", "화자_ID": None}],
+            "음성_연출": [{"화자_ID": "S1", "목소리_설명": "목소리", "연출_이유": "이유"}],
+            "minimax_prompt": "<Picture 1> No speech.",
+            "선택_사진": [{"파일명": "photo.jpg", "선택_이유": "이유"}]})
+        with patch.dict("os.environ", {"use_tts": "qwen3"}):
+            main.validate_plan(result, [Path("photo.jpg")])
+
     def test_voice_mode_selects_matching_prompt(self):
         with patch.dict("os.environ", {"use_tts": "qwen3"}):
             self.assertTrue(main.qwen_tts_enabled())
@@ -119,26 +130,75 @@ class QwenBatchTests(unittest.TestCase):
                 def wait(self):
                     return 0
 
-            def whisper(command, check, env):
-                jobs = json.loads(Path(command[2]).read_text(encoding="utf-8"))
-                Path(command[2]).with_name("whisper_results.json").write_text(
-                    json.dumps([{"folder": jobs[0]["folder"], "segments": [{"text": "짧은 대본", "start": 0, "end": 1}]}]), encoding="utf-8")
+            class WhisperWorker(Worker):
+                def write(self, line):
+                    self.pending.append(json.dumps({"check": {"complete": True}, "segments": [{"text": "짧은 대본", "start": 0, "end": 1}]}))
 
             first = {"15초_스크립트": [{"내레이션": "긴 대본"}]}
             shorter = {"15초_스크립트": [{"내레이션": "짧은 대본"}]}
             job = {"folder": root, "result": first, "place": {}, "reviews": [], "analysis": "{}", "photos": []}
-            with patch.object(main.subprocess, "Popen", return_value=Worker()) as popen, \
-                 patch.object(main.subprocess, "run", side_effect=whisper), \
+            with patch.object(main.subprocess, "Popen", side_effect=[Worker(), WhisperWorker()]) as popen, \
                  patch.object(main, "shorten_voice_pauses", side_effect=lambda path, duration: (path, duration)), \
                  patch.object(main, "speed_up_voice", side_effect=lambda path: (path, 16.0 if "attempt_1" in path.name else 10.0)), \
                  patch.object(main, "trim_voice_boundary_silence", side_effect=lambda path, duration: (path, duration)), \
                  patch.object(main, "recorded_client", return_value=object()), \
                  patch.object(main, "plan", return_value=shorter) as replan:
                 result = main.generate_qwen_batch([job], object())
-            self.assertEqual(popen.call_count, 1)
+            self.assertEqual(popen.call_count, 2)
             self.assertEqual(replan.call_count, 1)
             self.assertEqual(job["result"], shorter)
             self.assertEqual(result[str(root.resolve())]["clips"][0]["duration"], 10.0)
+            self.assertEqual((root / "06_narration_attempt_1.txt").read_text(encoding="utf-8"), "긴 대본")
+            self.assertEqual((root / "06_narration_attempt_2.txt").read_text(encoding="utf-8"), "짧은 대본")
+
+    def test_missing_last_sentence_regenerates_same_script(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            class Worker:
+                def __init__(self, is_whisper=False):
+                    self.is_whisper = is_whisper
+                    self.stdin = self.stdout = self
+                    self.pending = []
+                    self.calls = 0
+                    self.texts = []
+
+                def write(self, line):
+                    job = json.loads(line)
+                    self.calls += 1
+                    self.texts.append(job["text"])
+                    if self.is_whisper:
+                        self.pending.append(json.dumps({"check": {"complete": self.calls > 1}, "segments": [{"text": "끝", "start": 0, "end": 1}]}))
+                    else:
+                        Path(job["path"]).write_bytes(b"audio")
+                        self.pending.append(json.dumps({"duration": 10.0}))
+
+                def readline(self):
+                    return self.pending.pop(0)
+
+                def flush(self):
+                    pass
+
+                def close(self):
+                    pass
+
+                def wait(self):
+                    return 0
+
+            qwen, whisper = Worker(), Worker(is_whisper=True)
+            job = {"folder": root, "result": {"15초_스크립트": [{"내레이션": "첫 문장. 마지막 문장이에요."}]}}
+            with patch.object(main.subprocess, "Popen", side_effect=[qwen, whisper]) as popen, \
+                 patch.object(main, "shorten_voice_pauses", side_effect=lambda path, duration: (path, duration)), \
+                 patch.object(main, "speed_up_voice", side_effect=lambda path: (path, 10.0)), \
+                 patch.object(main, "plan") as replan:
+                result = main.generate_qwen_batch([job], object())
+            self.assertEqual(popen.call_count, 2)
+            self.assertEqual(qwen.calls, 2)
+            self.assertEqual(qwen.texts[0], qwen.texts[1])
+            for index, text in enumerate(qwen.texts, 1):
+                self.assertEqual((root / f"06_narration_attempt_{index}.txt").read_text(encoding="utf-8"), text)
+            replan.assert_not_called()
+            self.assertTrue(result[str(root.resolve())]["segments"])
+            self.assertTrue((root / "06_narration_attempt_1.wav").exists())
 
     def test_trim_only_boundary_silence_when_it_fits_15_seconds(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -208,15 +268,16 @@ class QwenBatchTests(unittest.TestCase):
                                                       {"start": 0.4, "end": 0.7, "text": "나레이션"}])
             self.assertTrue(output.is_file())
             self.assertGreater(output.stat().st_size, 0)
-            subtitle = (root / "subtitles.srt").read_text(encoding="utf-8-sig")
-            self.assertIn("00:00:00,200 --> 00:00:00,400", subtitle)
+            subtitle = (root / "subtitles.ass").read_text(encoding="utf-8-sig")
+            self.assertIn("0:00:00.20,0:00:00.40", subtitle)
             self.assertIn("실제\n", subtitle)
             self.assertIn("나레이션\n", subtitle)
+            self.assertFalse((root / "subtitles.srt").exists())
 
     def test_transcript_timing_preserves_original_text_with_mismatch(self):
         modules = {"torch": types.SimpleNamespace(), "transformers": types.SimpleNamespace(pipeline=None)}
         with patch.dict(sys.modules, modules):
-            module = runpy.run_path(str(main.ROOT / "marketing" / "wav_to_srt_batch.py"))
+            module = runpy.run_path(str(main.ROOT / "marketing" / "wav_to_subtitle_timings.py"))
         align = module["align_transcript"]
         entries = align("저장해요, 좋아요!", [{"text": "저장해요", "timestamp": (0.2, 0.7)},
                                            {"text": "좋아요", "timestamp": (0.8, 1.2)}], 1.5)
@@ -225,20 +286,43 @@ class QwenBatchTests(unittest.TestCase):
         self.assertEqual(entries[0]["text"], "저장해요")
         self.assertLess(entries[0]["start"], entries[0]["end"])
 
+    def test_last_sentence_check_tolerates_minor_asr_errors_but_rejects_missing_ending(self):
+        modules = {"transformers": types.SimpleNamespace(pipeline=None)}
+        with patch.dict(sys.modules, modules):
+            module = runpy.run_path(str(main.ROOT / "marketing" / "wav_to_subtitle_timings.py"))
+        check = module["check_last_sentence"]
+        script = "여러분은 돌짜장파, 돌짬뽕파? 친구에게 보내고 선택도 알려주세요."
+        self.assertFalse(check(script, "여러분은 돌짜장파 돌짬뽕") ["complete"])
+        self.assertTrue(check(script, "여러분은 돌짜장파 돌짬뽕파 친구에게 보내고 선택도 알려 주세요")["complete"])
+        self.assertTrue(check("마음에 들면 저장해요!", "마음에 들면 자장해요")["complete"])
+
     def test_transcript_timing_preserves_omitted_script_words(self):
         modules = {"torch": types.SimpleNamespace(), "transformers": types.SimpleNamespace(pipeline=None)}
         with patch.dict(sys.modules, modules):
-            module = runpy.run_path(str(main.ROOT / "marketing" / "wav_to_srt_batch.py"))
+            module = runpy.run_path(str(main.ROOT / "marketing" / "wav_to_subtitle_timings.py"))
         entries = module["align_transcript"]("맛있는 국밥 먹으러 가요", [
             {"text": "맛있는", "timestamp": (0.0, 0.6)},
             {"text": "먹으러 가요", "timestamp": (0.6, 1.6)}], 2.0)
         self.assertEqual([item["text"] for item in entries], ["맛있는", "국밥", "먹으러", "가요"])
         self.assertTrue(all(item["start"] < item["end"] for item in entries))
 
+    def test_missing_word_does_not_reset_other_word_timestamps(self):
+        modules = {"torch": types.SimpleNamespace(), "transformers": types.SimpleNamespace(pipeline=None)}
+        with patch.dict(sys.modules, modules):
+            module = runpy.run_path(str(main.ROOT / "marketing" / "wav_to_subtitle_timings.py"))
+        entries = module["align_transcript"]("맛있는 국밥 먹으러 가요", [
+            {"text": "맛있는", "timestamp": (0.0, 0.6)},
+            {"text": "먹으러", "timestamp": (0.6, 1.3)},
+            {"text": "가요", "timestamp": (4.0, 4.5)}], 5.0)
+        self.assertEqual([item["text"] for item in entries], ["맛있는", "국밥", "먹으러", "가요"])
+        self.assertAlmostEqual(entries[-1]["start"], 4.0)
+        self.assertAlmostEqual(entries[-1]["end"], 4.5)
+        self.assertTrue(all(item["start"] < item["end"] for item in entries))
+
     def test_whisper_chunks_split_on_original_spaces(self):
         modules = {"torch": types.SimpleNamespace(), "transformers": types.SimpleNamespace(pipeline=None)}
         with patch.dict(sys.modules, modules):
-            module = runpy.run_path(str(main.ROOT / "marketing" / "wav_to_srt_batch.py"))
+            module = runpy.run_path(str(main.ROOT / "marketing" / "wav_to_subtitle_timings.py"))
         chunks = [{"text": "동해물과 백두산이", "timestamp": (0.0, 1.0)},
                   {"text": "마르", "timestamp": (1.0, 1.3)},
                   {"text": "고 닳도록.", "timestamp": (1.3, 2.0)}]
@@ -252,9 +336,10 @@ class QwenBatchTests(unittest.TestCase):
             shots = [{"시작초": 0, "종료초": 4, "내레이션": "동해물과 백두산이 마르고 닳도록."}]
             with patch.dict("os.environ", {"WATERMARK_ENABLED": "false"}), patch.object(main.subprocess, "run"):
                 main.add_subtitles(root / "raw.mp4", root / "video.mp4", shots)
-            srt = (root / "subtitles.srt").read_text(encoding="utf-8-sig")
+            ass = (root / "subtitles.ass").read_text(encoding="utf-8-sig")
             for word in ("동해물과", "백두산이", "마르고", "닳도록."):
-                self.assertIn("\n" + word + "\n", srt)
+                self.assertIn("}" + word + "\n", ass)
+            self.assertFalse((root / "subtitles.srt").exists())
 
 
 if __name__ == "__main__":

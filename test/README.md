@@ -15,7 +15,7 @@
 3. `03_photos.py`: 사진 다운로드 → `photos/`
 4. `04_analysis.py`: 사진 분석 → `analysis.txt`
 5. `05_plan.py`: 전략, 15초 스크립트, 유튜브 정보와 프롬프트 → `plan.json`
-6. `06_video.py`: ComfyUI 영상 생성 → `video_raw.mp4`, FFmpeg 자막 합성 → `video.mp4` 및 `subtitles.srt`
+6. `06_video.py`: ComfyUI 영상 생성 → `video_raw.mp4`, FFmpeg 자막 합성 → `video.mp4` 및 `subtitles.ass`
 
 결과는 기본적으로 `test/results/<장소 ID>/`에 저장됩니다. 각 단계는 앞 단계의 결과 파일을 입력으로 사용하므로 앞 단계를 실행하거나 같은 형식의 파일을 직접 준비하세요. 같은 단계를 다시 실행하면 같은 이름의 파일을 덮어쓸 수 있습니다. 사진 분석은 `photos/`, 전략 수립은 `place.json`, `reviews.json`, `analysis.txt`, `photos/`, 영상 생성은 `plan.json`의 `minimax_prompt`와 `photos/`가 필요합니다.
 
