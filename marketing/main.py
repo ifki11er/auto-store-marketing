@@ -1079,21 +1079,23 @@ def generate_qwen_batch(jobs, client=None):
                             if attempt == 3:
                                 raise ValueError("세 번 생성해도 마지막 문장이 음성에서 확인되지 않습니다")
                             continue
-                        if not check.get("segments"):
-                            raise ValueError("음성에 맞춘 자막 시간 정보가 없습니다")
-                        path = folder / "06_narration.wav"
-                        shutil.copy2(candidate, path)
-                        results[key] = {"folder": key, "clips": [{"path": str(path), "start": 0.0, "duration": duration}],
-                                        "segments": check["segments"]}
-                        break
+                        if duration >= 12:
+                            if not check.get("segments"):
+                                raise ValueError("음성에 맞춘 자막 시간 정보가 없습니다")
+                            path = folder / "06_narration.wav"
+                            shutil.copy2(candidate, path)
+                            results[key] = {"folder": key, "clips": [{"path": str(path), "start": 0.0, "duration": duration}],
+                                            "segments": check["segments"]}
+                            break
                     if attempt == 3:
-                        raise ValueError(f"세 번 기획해도 음성이 15초를 초과합니다: {duration:.2f}초")
-                    print(f"음성 {duration:.2f}초: 15초 이내로 대본을 다시 기획합니다 ({attempt}/3)", flush=True)
+                        raise ValueError(f"세 번 생성해도 음성이 12~15초 범위에 들지 않습니다: {duration:.2f}초")
+                    print(f"음성 {duration:.2f}초: 12~15초에 맞게 대본을 다시 기획합니다 ({attempt}/3)", flush=True)
                     if not all(name in job for name in ("place", "reviews", "analysis", "photos")):
                         raise ValueError("대본 재기획에 필요한 가게 정보, 후기, 사진 분석이 없습니다")
                     replan_client = recorded_client(client or OpenAI(), folder, f"replan_{attempt + 1}", "05")
+                    direction = "짧습니다. 나레이션을 더 길게 작성하세요" if duration < 12 else "깁니다. 나레이션을 더 짧게 작성하세요"
                     result = plan(replan_client, job["place"], job["reviews"], job["analysis"], job["photos"],
-                                  revision_feedback=f"음성 길이가 {duration:.2f}초로 15초를 초과했습니다.", requested_format=job.get("format"))
+                                  revision_feedback=f"무음 제거와 1.1배속 적용 후 음성 길이가 {duration:.2f}초로 12~15초 범위보다 {direction}. 최종 음성이 12~15초가 되도록 조정하세요.", requested_format=job.get("format"))
                     job["result"] = result
                     write_json(folder / f"05_plan_attempt_{attempt + 1}.json", result)
                     write_json(folder / "05_plan.json", result)

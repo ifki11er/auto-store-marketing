@@ -139,7 +139,7 @@ class QwenBatchTests(unittest.TestCase):
             job = {"folder": root, "result": first, "place": {}, "reviews": [], "analysis": "{}", "photos": []}
             with patch.object(main.subprocess, "Popen", side_effect=[Worker(), WhisperWorker()]) as popen, \
                  patch.object(main, "shorten_voice_pauses", side_effect=lambda path, duration: (path, duration)), \
-                 patch.object(main, "speed_up_voice", side_effect=lambda path: (path, 16.0 if "attempt_1" in path.name else 10.0)), \
+                 patch.object(main, "speed_up_voice", side_effect=lambda path: (path, 16.0 if "attempt_1" in path.name else 13.0)), \
                  patch.object(main, "trim_voice_boundary_silence", side_effect=lambda path, duration: (path, duration)), \
                  patch.object(main, "recorded_client", return_value=object()), \
                  patch.object(main, "plan", return_value=shorter) as replan:
@@ -147,9 +147,45 @@ class QwenBatchTests(unittest.TestCase):
             self.assertEqual(popen.call_count, 2)
             self.assertEqual(replan.call_count, 1)
             self.assertEqual(job["result"], shorter)
-            self.assertEqual(result[str(root.resolve())]["clips"][0]["duration"], 10.0)
+            self.assertEqual(result[str(root.resolve())]["clips"][0]["duration"], 13.0)
             self.assertEqual((root / "06_narration_attempt_1.txt").read_text(encoding="utf-8"), "긴 대본")
             self.assertEqual((root / "06_narration_attempt_2.txt").read_text(encoding="utf-8"), "짧은 대본")
+
+    def test_short_wav_replans_with_longer_script(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            class Worker:
+                def __init__(self, whisper=False):
+                    self.stdin = self.stdout = self
+                    self.whisper = whisper
+                    self.pending = []
+
+                def write(self, line):
+                    job = json.loads(line)
+                    if self.whisper:
+                        self.pending.append(json.dumps({"check": {"complete": True}, "segments": [{"text": "대본", "start": 0, "end": 1}]}))
+                    else:
+                        Path(job["path"]).write_bytes(b"audio")
+                        self.pending.append(json.dumps({"duration": 10.0}))
+
+                def flush(self): pass
+                def close(self): pass
+                def wait(self): return 0
+                def readline(self): return self.pending.pop(0)
+
+            first = {"15초_스크립트": [{"내레이션": "짧은 대본"}]}
+            longer = {"15초_스크립트": [{"내레이션": "더 긴 대본"}]}
+            job = {"folder": root, "result": first, "place": {}, "reviews": [], "analysis": "{}", "photos": []}
+            with patch.object(main.subprocess, "Popen", side_effect=[Worker(), Worker(whisper=True)]), \
+                 patch.object(main, "shorten_voice_pauses", side_effect=lambda path, duration: (path, duration)), \
+                 patch.object(main, "speed_up_voice", side_effect=lambda path: (path, 10.0 if "attempt_1" in path.name else 13.0)), \
+                 patch.object(main, "recorded_client", return_value=object()), \
+                 patch.object(main, "plan", return_value=longer) as replan:
+                result = main.generate_qwen_batch([job], object())
+            self.assertEqual(result[str(root.resolve())]["clips"][0]["duration"], 13.0)
+            self.assertIn("더 길게", replan.call_args.kwargs["revision_feedback"])
+            self.assertEqual((root / "06_narration_attempt_1.txt").read_text(encoding="utf-8"), "짧은 대본")
+            self.assertEqual((root / "06_narration_attempt_2.txt").read_text(encoding="utf-8"), "더 긴 대본")
 
     def test_missing_last_sentence_regenerates_same_script(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -188,7 +224,7 @@ class QwenBatchTests(unittest.TestCase):
             job = {"folder": root, "result": {"15초_스크립트": [{"내레이션": "첫 문장. 마지막 문장이에요."}]}}
             with patch.object(main.subprocess, "Popen", side_effect=[qwen, whisper]) as popen, \
                  patch.object(main, "shorten_voice_pauses", side_effect=lambda path, duration: (path, duration)), \
-                 patch.object(main, "speed_up_voice", side_effect=lambda path: (path, 10.0)), \
+                 patch.object(main, "speed_up_voice", side_effect=lambda path: (path, 10.0 if "attempt_1" in path.name else 13.0)), \
                  patch.object(main, "plan") as replan:
                 result = main.generate_qwen_batch([job], object())
             self.assertEqual(popen.call_count, 2)
