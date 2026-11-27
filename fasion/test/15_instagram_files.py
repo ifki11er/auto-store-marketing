@@ -33,7 +33,7 @@ def main():
                 hashtags.append("#" + clean)
         if not hashtags:
             raise ValueError(f"인스타그램 해시태그가 없습니다: {job}")
-        captions.setdefault(target, []).append(f"[영상] {name}\n{data['description'].strip()}\n\n{' '.join(hashtags)}\n")
+        captions.setdefault(target, []).append(f"[영상] {name}\n[제목] {data['youtube_title'].strip()}\n{data['description'].strip()}\n\n{' '.join(hashtags)}\n")
         print(f"인스타그램 파일 준비: {target / name}", flush=True)
     for folder, sections in captions.items():
         (folder / "전체_설명.txt").write_text("\n".join(sections), encoding="utf-8-sig")

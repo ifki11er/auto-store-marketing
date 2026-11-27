@@ -34,7 +34,7 @@ def reels_url(region):
 
 
 
-def hashtags_for(video):
+def title_and_hashtags_for(video):
     text = (video.parent / "전체_설명.txt").read_text(encoding="utf-8-sig")
     sections = re.split(r"(?m)^\[영상\] ", text)
     matches = [section.split("\n", 1)[1] for section in sections[1:]
@@ -42,10 +42,13 @@ def hashtags_for(video):
     if len(matches) != 1:
         raise ValueError(f"영상에 해당하는 설명을 하나로 확인할 수 없습니다: {video.name}")
     lines = [line.strip() for line in matches[0].splitlines() if line.strip()]
+    if not lines or not lines[0].startswith("[제목] ") or not lines[0][len("[제목] "):].strip():
+        raise ValueError(f"영상 제목이 없습니다. 15번 스크립트로 파일을 다시 준비하세요: {video.name}")
+    title = lines[0][len("[제목] "):].strip()
     hashtags = re.findall(r"#[\w]+", lines[-1]) if lines else []
     if not hashtags or " ".join(hashtags) != lines[-1]:
         raise ValueError(f"영상 설명의 해시태그를 확인할 수 없습니다: {video.name}")
-    return hashtags
+    return title, hashtags
 
 
 def upload_video(page, region, video, entry, log):
@@ -53,8 +56,9 @@ def upload_video(page, region, video, entry, log):
     if not filename_match:
         raise ValueError(f"파일명에서 예약 날짜와 시간을 확인할 수 없습니다: {video.name}")
     scheduled = datetime.strptime(" ".join(filename_match.groups()), "%Y-%m-%d %H%M")
-    hashtags = hashtags_for(video)
+    title, hashtags = title_and_hashtags_for(video)
     hashtag_text = " ".join(hashtags)
+    caption_text = title + "\n\n" + hashtag_text
     print(f"선택한 영상: {video}", flush=True)
     print(f"해시태그: {hashtag_text}", flush=True)
     page.goto(reels_url(region), wait_until="domcontentloaded", timeout=60000)
@@ -76,7 +80,7 @@ def upload_video(page, region, video, entry, log):
         editor = page.locator('[contenteditable="true"]:visible').filter(
             has=page.locator('[data-contents="true"]')
         )
-        editor.fill(hashtag_text, timeout=30000)
+        editor.fill(caption_text, timeout=30000)
         print(f"{platform} 텍스트 입력 완료", flush=True)
     tag_input = page.get_by_text("태그", exact=True).locator(
         "xpath=ancestor::div[.//input[@role='combobox']][1]"

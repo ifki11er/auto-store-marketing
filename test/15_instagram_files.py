@@ -26,16 +26,17 @@ def filename_for(day, slot, place_id, place_name):
 
 
 def caption_for(plan):
+    title = plan.get("유튜브_제목")
     description = plan.get("유튜브_본문")
     tags = plan.get("유튜브_태그")
-    if not isinstance(description, str) or not isinstance(tags, list) or any(not isinstance(tag, str) for tag in tags):
-        raise ValueError("기획 파일의 설명 또는 태그 형식이 올바르지 않습니다")
+    if not isinstance(title, str) or not title.strip() or not isinstance(description, str) or not isinstance(tags, list) or any(not isinstance(tag, str) for tag in tags):
+        raise ValueError("기획 파일의 제목, 설명 또는 태그 형식이 올바르지 않습니다")
     hashtags = []
     for tag in tags:
         name = "".join(char for char in tag.strip().lstrip("#") if char.isalnum() or char == "_")
         if name and "#" + name not in hashtags:
             hashtags.append("#" + name)
-    return description.strip() + ("\n\n" + " ".join(hashtags) if hashtags else "") + "\n"
+    return "[제목] " + title.strip() + "\n" + description.strip() + ("\n\n" + " ".join(hashtags) if hashtags else "") + "\n"
 
 
 def main():
