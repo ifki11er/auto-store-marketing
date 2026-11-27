@@ -1125,7 +1125,7 @@ def main(argv=None, single=False):
     parser.add_argument("--place-id", help="특정 가게만 처리")
     parser.add_argument("--after-id", default="", help="이 ID 다음부터 검색")
     parser.add_argument("--max-photos", type=int, default=10, help="다운로드할 최대 사진 수 (최대 10장)")
-    parser.add_argument("--comfy-url", default="http://127.0.0.1:8188")
+    parser.add_argument("--comfy-url", default=os.environ.get("COMFYUI_URL", "http://127.0.0.1:8188").strip())
     parser.add_argument("--workflow", choices=("Deno_MiniMax_H3_R2V_Turbo_8plus2", "video_fasth3_ominiref_r2v", "Deno_minimax_final_R2V_7plus1_memopt_Sol"),
                         default=os.environ.get("VIDEO_WORKFLOW", "Deno_MiniMax_H3_R2V_Turbo_8plus2").strip(),
                         help="영상 생성 워크플로우 (.env의 VIDEO_WORKFLOW보다 우선)")

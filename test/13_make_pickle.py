@@ -5,7 +5,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 ROOT = Path(__file__).resolve().parent.parent
-CLIENT_SECRET = ROOT / "res" / "technam_client_secret.json"
+# CLIENT_SECRET = ROOT / "res" / "technam_client_secret.json"
+CLIENT_SECRET = ROOT / "res" / "iifkiller_client_secret.json"
 OUTPUT_FILE = ROOT / "res" / "tmp.pickle"
 SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
 
