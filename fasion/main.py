@@ -63,19 +63,28 @@ def main():
 
 
 def generate_one(client, categories, slot, face, stage, bgm, count, seconds, workflow_name, country, settings):
-    category = random.choice(categories)
-    brand = category.parent.parent.name
-    print(f"선택 카테고리: {brand} / {country} / {category.name}", flush=True)
     history = load_history()
-    job = OUTPUT / "작업중" / datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    job.mkdir(parents=True)
-    print(f"GPT 기록 저장 위치: {job}", flush=True)
-    products = select_products(client, category, count, history, job, country, seconds)
+    candidates = list(categories)
+    random.shuffle(candidates)
+    for category in candidates:
+        brand = category.parent.parent.name
+        print(f"선택 카테고리: {brand} / {country} / {category.name}", flush=True)
+        job = OUTPUT / "작업중" / datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        job.mkdir(parents=True)
+        print(f"GPT 기록 저장 위치: {job}", flush=True)
+        products = select_products(client, category, count, history, job, country, seconds)
+        if len(products) >= min(2, count):
+            if len(products) < count:
+                print(f"사용 가능한 상품 {len(products)}개로 영상 생성 (설정: {count}개)", flush=True)
+            break
+        print(f"사용 가능한 상품 {len(products)}개: 카테고리를 건너뜁니다.", flush=True)
+    else:
+        raise RuntimeError(f"{country}: 사용 가능한 상품이 충분한 카테고리가 없습니다.")
     metadata = plan(client, brand, category.name, products, job, seconds, country, settings)
     (job / "03_metadata.json").write_text(json.dumps({**metadata, "brand": brand, "country": country, "currency": settings["currency"], "category": category.name, "influencer_image": str(face), "bgm": str(bgm), "products": products}, ensure_ascii=False, indent=2), encoding="utf-8")
     base = os.environ.get("COMFYUI_URL", "http://127.0.0.1:8188").strip().rstrip("/")
     for index, product in enumerate(products):
-        print(f"런웨이 생성 중 ({index + 1}/{count}): {product['name']}", flush=True)
+        print(f"런웨이 생성 중 ({index + 1}/{len(products)}): {product['name']}", flush=True)
         scene = product["scene"]
         if scene["use_runway_reference"]:
             if not stage:

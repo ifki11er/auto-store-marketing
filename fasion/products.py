@@ -174,4 +174,4 @@ def select_products(client, category, count, history, job, country, seconds):
             history[image_key] = True
             write_history(history)
             print(f"사용 불가 사진 이력 저장: {path.name}", flush=True)
-    raise RuntimeError(f"{category.name}: 사용하지 않은 적합한 상품이 {len(chosen)}개뿐입니다. {count}개가 필요합니다.")
+    return chosen
