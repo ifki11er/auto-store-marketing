@@ -10,4 +10,6 @@
 
 background와 action에는 배경과 동작만 작성하고 옷의 종류, 색상, 무늬, 디자인 등 옷의 모습을 설명하지 마세요.
 
-JSON 객체로 {"usable": true 또는 false, "background": "배경과 분위기", "action": "동작"}만 반환하세요. 사용할 수 없다면 background와 action은 빈 문자열로 반환하세요.
+필요하면 의상과 배경에 어울리는 액세서리를 스타일링 소품으로 선택해 accessories에 영어로 간결하게 작성하세요. 액세서리는 사진 속 판매 상품이 아닌 별도의 추가 소품이며, 출연자의 얼굴과 헤어스타일이 잘 보이도록 선택하세요. 적합한 소품이 없다면 빈 문자열로 반환하세요.
+
+JSON 객체로 {"usable": true 또는 false, "background": "배경과 분위기", "action": "동작", "accessories": "추가 액세서리"}만 반환하세요. 사용할 수 없다면 background, action, accessories는 빈 문자열로 반환하세요.

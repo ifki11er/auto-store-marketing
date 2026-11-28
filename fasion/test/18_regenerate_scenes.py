@@ -120,13 +120,14 @@ def regenerate(job_config):
         result = ask(client, [{"type": "input_text", "text": analysis_prompt() + "\n" + json.dumps(context, ensure_ascii=False)}, image_input(reference)], staging, stage)
         if result.get("usable") is not True:
             raise ValueError(f"씬 {index + 1}의 옷 사진을 GPT가 사용할 수 없다고 판단했습니다: {reference}")
-        background, action = result.get("background"), result.get("action")
+        background, action, accessories = result.get("background"), result.get("action"), result.get("accessories", "")
         if (not isinstance(background, str) or not background.strip() or len(background) > 300 or any(c in background for c in "<>{}")
-                or not isinstance(action, str) or not action.strip() or len(action) > 300 or any(c in action for c in "<>{}")):
+                or not isinstance(action, str) or not action.strip() or len(action) > 300 or any(c in action for c in "<>{}")
+                or not isinstance(accessories, str) or len(accessories) > 300 or any(c in accessories for c in "<>{}")):
             raise ValueError(f"씬 {index + 1}의 GPT 배경·동작 정보가 올바르지 않습니다: {reference}")
         use_runway = bool(re.search(r"\b(?:indoor|interior)\b", background, re.IGNORECASE)
                           and re.search(r"\b(?:runway|catwalk)\b", background, re.IGNORECASE))
-        scene = {"background": background.strip(), "use_runway_reference": use_runway, "action": action.strip()}
+        scene = {"background": background.strip(), "use_runway_reference": use_runway, "action": action.strip(), "accessories": accessories.strip()}
         product["scene"] = scene
         references = [face]
         if scene["use_runway_reference"]:

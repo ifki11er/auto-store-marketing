@@ -13,7 +13,7 @@ retention_analysis:
 
 detailed_description:
 The target video uses a realistic live-action style.
-[Shot 1] In <Subject 3>, <Subject 1> is {{FACE_DESCRIPTION}}. <Subject 1> wears <Subject 2> and {{ACTION}}. The clothing fits naturally on <Subject 1>, whose face, hairstyle, and body build from <Picture 1> remain consistent throughout. Keep the person's full body visible throughout. Clean screen without subtitles. Duration: {{SECONDS}} seconds.
+[Shot 1] In <Subject 3>, <Subject 1> is {{FACE_DESCRIPTION}}. <Subject 1> wears <Subject 2> and {{ACTION}}. {{ACCESSORIES}} The clothing fits naturally on <Subject 1>, whose face, hairstyle, and body build from <Picture 1> remain consistent throughout. Keep the person's full body visible throughout. Clean screen without subtitles. Duration: {{SECONDS}} seconds.
 
 overall_soundscape: Silence throughout.
 non_diegetic_music: N/A.

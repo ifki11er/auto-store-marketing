@@ -22,6 +22,7 @@ def minimax_prompt(scene, seconds, face_image):
         "{{GARMENT_PICTURE}}": "<Picture 3>" if indoor else "<Picture 2>",
         "{{LOCATION_RETENTION}}": "<Subject 3>: fully_preserved - preserve the runway shown in <Picture 2>." if indoor else "",
         "{{ACTION}}": scene["action"],
+        "{{ACCESSORIES}}": f"Additional styling accessories: {scene['accessories']}." if scene.get("accessories") else "",
         "{{SECONDS}}": str(seconds),
         "{{FACE_DESCRIPTION}}": FACE_DESCRIPTIONS.get(Path(face_image).name.lower(), "the person shown in <Picture 1>")
         if Path(face_image).resolve().parent == (PROMPT_DIR.parent / "resources").resolve()

@@ -10,7 +10,7 @@ import unicodedata
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from fasion.config import HISTORY, OUTPUT, ROOT
+from fasion.config import DATA, HISTORY, OUTPUT, ROOT
 from fasion.gpt import ask, image_input
 from fasion.prompts import analysis_prompt
 
@@ -94,15 +94,15 @@ def next_output_slot(schedule, country):
 
 
 def save_history(history, brand, category, products, job, country):
+    selected = {product_group_key(brand, country, product["name"], product["price"]) for product in products}
+    for csv_path in (DATA / brand / country).glob("*/products.csv"):
+        with csv_path.open(encoding="utf-8-sig", newline="") as file:
+            for row in csv.DictReader(file):
+                name, price, image = row.get("name", ""), row.get("price", ""), row.get("image", "")
+                if name and price and image and product_group_key(brand, country, name, price) in selected:
+                    history[product_key(brand, image, country)] = True
     for product in products:
-        entry = {
-            "brand": brand, "country": country, "category": category, "name": product["name"],
-            "price": product["price"], "image": product["image"], "video": str(job / "07_final.mp4"),
-            "scene": product.get("scene"),
-            "created_at": datetime.now().isoformat(timespec="seconds"),
-        }
-        history[product_key(brand, product["image"], country)] = entry
-        history[product_group_key(brand, country, product["name"], product["price"])] = entry
+        history[product_key(brand, product["image"], country)] = True
     write_history(history)
 
 
@@ -151,14 +151,15 @@ def select_products(client, category, count, history, job, country, seconds):
         if not isinstance(result.get("usable"), bool):
             raise ValueError(f"GPT 사진 분석 결과에 사용 여부가 없습니다: {path.name}")
         if result["usable"]:
-            background, action = result.get("background"), result.get("action")
+            background, action, accessories = result.get("background"), result.get("action"), result.get("accessories", "")
             if (not isinstance(background, str) or not background.strip() or len(background) > 300 or any(c in background for c in "<>{}")
                     or not isinstance(action, str) or not action.strip()
-                    or len(action) > 300 or any(c in action for c in "<>{}")):
+                    or len(action) > 300 or any(c in action for c in "<>{}")
+                    or not isinstance(accessories, str) or len(accessories) > 300 or any(c in accessories for c in "<>{}")):
                 raise ValueError(f"GPT 장면 연출 정보가 올바르지 않습니다: {path.name}")
             use_runway = bool(re.search(r"\b(?:indoor|interior)\b", background, re.IGNORECASE)
                               and re.search(r"\b(?:runway|catwalk)\b", background, re.IGNORECASE))
-            scene = {"background": background.strip(), "use_runway_reference": use_runway, "action": action.strip()}
+            scene = {"background": background.strip(), "use_runway_reference": use_runway, "action": action.strip(), "accessories": accessories.strip()}
             chosen.append({"name": item.get("name", ""), "price": item.get("price", ""), "image": str(path),
                            "scene": scene,
                            "reference_image": str(reference.relative_to(job)) if reference != path else str(path)})
@@ -166,11 +167,7 @@ def select_products(client, category, count, history, job, country, seconds):
             if len(chosen) == count:
                 return chosen
         else:
-            history[image_key] = {
-                "status": "unusable", "brand": brand, "country": country, "category": category.name,
-                "name": item.get("name", ""), "image": str(path),
-                "created_at": datetime.now().isoformat(timespec="seconds"),
-            }
+            history[image_key] = True
             write_history(history)
             print(f"사용 불가 사진 이력 저장: {path.name}", flush=True)
     raise RuntimeError(f"{category.name}: 사용하지 않은 적합한 상품이 {len(chosen)}개뿐입니다. {count}개가 필요합니다.")
