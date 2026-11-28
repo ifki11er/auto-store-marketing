@@ -10,13 +10,16 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
-from fasion.main import WORKFLOWS, OpenAI, analysis_prompt, ask, configured_file, generate_clip, image_input, load_env, render
+from openai import OpenAI
+from fasion.config import WORKFLOWS, configured_file, load_env
+from fasion.gpt import ask, image_input
+from fasion.prompts import analysis_prompt
+from fasion.video import generate_clip, render
 
 
 # 씬 번호는 영상에 표시되는 순서대로 1부터 시작한다.
 JOBS = [
-    {"folder": r"C:\d\develop\auto_store_marketing\fasion\output\kr\2026-11-29\0800", "scenes": [1, 3, 4]},
-    {"folder": r"C:\d\develop\auto_store_marketing\fasion\output\kr\2026-11-29\1900", "scenes": [2, 3, 4]},
+    {"folder": r"C:\d\develop\auto_store_marketing\fasion\output\kr\2026-11-29\1900", "scenes": [1, 2, 3, 4]},
 ]
 
 
