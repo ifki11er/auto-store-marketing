@@ -102,6 +102,8 @@ def render(job, products, title, bgm, seconds, display_names, country):
         filename = f"05_title_{line_index}.txt"
         (job / filename).write_text(line, encoding="utf-8")
         y = "(290-text_h)/2" if len(title_lines) == 1 else str(145 - title_size - 8 + line_index * (title_size + 16))
+        if country == "kr":
+            y = f"({y})+15"
         title_filters.append(f"drawtext=fontfile=05_font.ttf:textfile={filename}:expansion=none:fontcolor=orange:fontsize={title_size}:x=(w-text_w)/2:y={y}")
     for index, product in enumerate(products):
         display_name = display_names[index].replace("®", "")

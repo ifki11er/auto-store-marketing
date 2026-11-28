@@ -152,14 +152,18 @@ def select_products(client, category, count, history, job, country, seconds):
             raise ValueError(f"GPT 사진 분석 결과에 사용 여부가 없습니다: {path.name}")
         if result["usable"]:
             background, action, accessories = result.get("background"), result.get("action"), result.get("accessories", "")
+            garment = result.get("garment_description")
+            outfit = result.get("outfit_description")
             if (not isinstance(background, str) or not background.strip() or len(background) > 300 or any(c in background for c in "<>{}")
                     or not isinstance(action, str) or not action.strip()
                     or len(action) > 300 or any(c in action for c in "<>{}")
-                    or not isinstance(accessories, str) or len(accessories) > 300 or any(c in accessories for c in "<>{}")):
+                    or not isinstance(accessories, str) or len(accessories) > 300 or any(c in accessories for c in "<>{}")
+                    or not isinstance(garment, str) or not garment.strip() or len(garment) > 300 or any(c in garment for c in "<>{}")
+                    or not isinstance(outfit, str) or not outfit.strip() or len(outfit) > 300 or any(c in outfit for c in "<>{}")):
                 raise ValueError(f"GPT 장면 연출 정보가 올바르지 않습니다: {path.name}")
             use_runway = bool(re.search(r"\b(?:indoor|interior)\b", background, re.IGNORECASE)
                               and re.search(r"\b(?:runway|catwalk)\b", background, re.IGNORECASE))
-            scene = {"background": background.strip(), "use_runway_reference": use_runway, "action": action.strip(), "accessories": accessories.strip()}
+            scene = {"background": background.strip(), "use_runway_reference": use_runway, "action": action.strip(), "accessories": accessories.strip(), "garment_description": garment.strip(), "outfit_description": outfit.strip()}
             chosen.append({"name": item.get("name", ""), "price": item.get("price", ""), "image": str(path),
                            "scene": scene,
                            "reference_image": str(reference.relative_to(job)) if reference != path else str(path)})

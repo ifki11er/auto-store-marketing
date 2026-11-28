@@ -19,7 +19,8 @@ from fasion.video import generate_clip, render
 
 # 씬 번호는 1부터 시작한다. 빈 목록은 기존 씬으로 자막과 영상을 재합성한다.
 JOBS = [
-    {"folder": r"C:\d\develop\auto_store_marketing\fasion\output\kr\2026-11-29\1900", "scenes": [1, 2, 3, 4]},
+    # {"folder": r"C:\d\develop\auto_store_marketing\fasion\output\kr\2026-11-29\0800", "scenes": []},
+    {"folder": r"C:\d\develop\auto_store_marketing\fasion\output\kr\2026-11-30\1900", "scenes": [3]},
 ]
 
 
@@ -122,13 +123,17 @@ def regenerate(job_config):
         if result.get("usable") is not True:
             raise ValueError(f"씬 {index + 1}의 옷 사진을 GPT가 사용할 수 없다고 판단했습니다: {reference}")
         background, action, accessories = result.get("background"), result.get("action"), result.get("accessories", "")
+        garment = result.get("garment_description")
+        outfit = result.get("outfit_description")
         if (not isinstance(background, str) or not background.strip() or len(background) > 300 or any(c in background for c in "<>{}")
                 or not isinstance(action, str) or not action.strip() or len(action) > 300 or any(c in action for c in "<>{}")
-                or not isinstance(accessories, str) or len(accessories) > 300 or any(c in accessories for c in "<>{}")):
+                or not isinstance(accessories, str) or len(accessories) > 300 or any(c in accessories for c in "<>{}")
+                or not isinstance(garment, str) or not garment.strip() or len(garment) > 300 or any(c in garment for c in "<>{}")
+                or not isinstance(outfit, str) or not outfit.strip() or len(outfit) > 300 or any(c in outfit for c in "<>{}")):
             raise ValueError(f"씬 {index + 1}의 GPT 배경·동작 정보가 올바르지 않습니다: {reference}")
         use_runway = bool(re.search(r"\b(?:indoor|interior)\b", background, re.IGNORECASE)
                           and re.search(r"\b(?:runway|catwalk)\b", background, re.IGNORECASE))
-        scene = {"background": background.strip(), "use_runway_reference": use_runway, "action": action.strip(), "accessories": accessories.strip()}
+        scene = {"background": background.strip(), "use_runway_reference": use_runway, "action": action.strip(), "accessories": accessories.strip(), "garment_description": garment.strip(), "outfit_description": outfit.strip()}
         product["scene"] = scene
         references = [face]
         if scene["use_runway_reference"]:

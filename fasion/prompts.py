@@ -20,6 +20,8 @@ def minimax_prompt(scene, seconds, face_image):
     replacements = {
         "{{LOCATION}}": "the runway in <Picture 2>, " + scene["background"] if indoor else scene["background"],
         "{{GARMENT_PICTURE}}": "<Picture 3>" if indoor else "<Picture 2>",
+        "{{GARMENT_DESCRIPTION}}": scene.get("garment_description") or "the clothing shown in " + ("<Picture 3>" if indoor else "<Picture 2>"),
+        "{{OUTFIT_DESCRIPTION}}": f"The complete outfit is {scene['outfit_description']}." if scene.get("outfit_description") else "Complete any missing top or bottom with matching clothing.",
         "{{LOCATION_RETENTION}}": "<Subject 3>: fully_preserved - preserve the runway shown in <Picture 2>." if indoor else "",
         "{{ACTION}}": scene["action"],
         "{{ACCESSORIES}}": f"Additional styling accessories: {scene['accessories']}." if scene.get("accessories") else "",
