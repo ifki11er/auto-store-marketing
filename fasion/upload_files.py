@@ -30,7 +30,10 @@ def scheduled_videos():
                 slot = datetime.strptime(slot_dir.name, "%H%M").time()
             except ValueError:
                 continue
-            for job in sorted(slot_dir.iterdir()):
+            jobs = [slot_dir] + [p for p in sorted(slot_dir.iterdir()) if p.is_dir()]
+            for job in jobs:
+                if job.name.startswith("08_재생성_백업_"):
+                    continue
                 video = job / "07_final.mp4"
                 metadata = job / "03_metadata.json"
                 if not video.exists():

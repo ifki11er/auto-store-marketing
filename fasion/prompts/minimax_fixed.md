@@ -1,18 +1,19 @@
 subject_definitions:
-<Subject 1> is the influencer in <Picture 1>. Preserve her facial features, makeup, hair color and hairstyle as shown, including the position and shape of any ponytail, fringe and hair accessories.
-<Subject 2> is {{LOCATION_DEFINITION}}.
-<Subject 3> is the garment shown in {{GARMENT_PICTURE}}.
+<Subject 1> is {{FACE_DESCRIPTION}} in <Picture 1>, the person appearing in the video whose identity, face, hairstyle, and body build come exclusively from <Picture 1>, replacing any person in {{GARMENT_PICTURE}}.
+<Subject 2> is strictly the clothing shown in {{GARMENT_PICTURE}}, transferred as wearable items without the body, face, hair, pose, or identity of any person in that picture.
+<Subject 3> is {{LOCATION}}.
 
 summary:
-[reference generation] A photorealistic fashion film shows <Subject 1> wearing <Subject 3> in <Subject 2>.
+[reference generation] <Subject 1> wears the clothing of <Subject 2> in <Subject 3>, preserving the identity from <Picture 1>.
 
 retention_analysis:
-<Subject 1>: fully_preserved - preserve the influencer's face, facial structure, features, skin tone and hairstyle from <Picture 1> throughout every frame, including hair color, length, fringe, parting and arrangement. Do not substitute the face or hairstyle of the model in {{GARMENT_PICTURE}} or restyle the influencer's hair.
+<Subject 1> (appears in [Shot 1]): fully_preserved - preserve the identity, face, hairstyle, and body build from <Picture 1>, with no blending from any person in {{GARMENT_PICTURE}}.
+<Subject 2> (appears in [Shot 1]): attribute_transfer - transfer only the clothing exactly as shown in {{GARMENT_PICTURE}} onto <Subject 1>, excluding the original wearer's body and identity.
 {{LOCATION_RETENTION}}
-<Subject 3>: fully_preserved - retain the garment's visible colors, silhouette and details. Complete missing parts of the outfit with complementary clothing.
 
 detailed_description:
-[Shot 1] A photorealistic live-action fashion film with realistic skin and fabric. <Subject 1>, with the same face, makeup and hairstyle as <Picture 1>, wears <Subject 3> and performs the selected action confidently in <Subject 2>. Use a full-body wide shot throughout the entire scene: keep her whole body and complete outfit visible from the top of her head to the soles of her feet in every frame, with clear space around her. Maintain enough camera distance during all movement; never crop her head, legs or feet and never switch to a close-up or upper-body shot. Keep the body and garment unobstructed, including in water settings. The camera movement is {{CAMERA}} and must preserve this full-body framing. Scene direction: {{SCENE_DIRECTION}}. Her hairstyle remains as in <Picture 1> throughout; do not release, replace or restyle it. She does not speak, sing, lip-sync or make speech-like mouth movements. Do not add subtitles, titles or other on-screen text. The scene lasts {{SECONDS}} seconds.
+The target video uses a realistic live-action style.
+[Shot 1] In <Subject 3>, <Subject 1> is {{FACE_DESCRIPTION}}. <Subject 1> wears <Subject 2> and {{ACTION}}. The clothing fits naturally on <Subject 1>, whose face, hairstyle, and body build from <Picture 1> remain consistent throughout. Keep the person's full body visible throughout. Clean screen without subtitles. Duration: {{SECONDS}} seconds.
 
-overall_soundscape: Silence throughout. No dialogue, narration, singing, voices or vocal sounds.
-non_diegetic_music: N/A. No background music or score.
+overall_soundscape: Silence throughout.
+non_diegetic_music: N/A.

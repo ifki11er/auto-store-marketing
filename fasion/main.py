@@ -18,7 +18,7 @@ from datetime import timedelta
 
 import requests
 from openai import OpenAI
-from fasion.prompts import CAMERAS, LOCATIONS, analysis_prompt, minimax_prompt, planning_prompt
+from fasion.prompts import analysis_prompt, minimax_prompt, planning_prompt
 from fasion.locale_settings import selected_locales
 from marketing.token_usage import record_token_usage
 from marketing.upload_schedule import UploadSchedule
@@ -40,9 +40,8 @@ def load_env():
         key, sep, value = line.strip().partition("=")
         if sep and key.isidentifier():
             value = value.strip().strip("\"'")
-            if key == "FASION_BGM" and any(char in os.environ.get(key, "") for char in "\r\n"):
+            if key in ("FASION_CLOTHES_COUNT", "FASION_SECONDS_PER_CLOTHES"):
                 os.environ[key] = value
-                print("줄바꿈이 포함된 FASION_BGM 환경 변수를 .env 설정으로 다시 읽었습니다.", flush=True)
             else:
                 os.environ.setdefault(key, value)
 
@@ -172,8 +171,10 @@ def next_output_slot(schedule, country):
         for clock in schedule.publish_times:
             matches = False
             for folder in (OUTPUT / country / day.isoformat() / clock.strftime("%H%M"), OUTPUT / day.isoformat() / clock.strftime("%H%M")):
-              for pattern in ("*/07_final.mp4", "*/final.mp4"):
+              for pattern in ("07_final.mp4", "final.mp4", "*/07_final.mp4", "*/final.mp4"):
                 for video in folder.glob(pattern) if folder.is_dir() else []:
+                    if video.parent.name.startswith("08_재생성_백업_"):
+                        continue
                     if not video.is_file() or not video.stat().st_size:
                         continue
                     metadata = video.parent / "03_metadata.json"
@@ -224,18 +225,6 @@ def select_products(client, category, count, history, job, country, seconds):
     random.shuffle(candidates)
     chosen = []
     selected_keys = set()
-    recent = []
-    seen = set()
-    for entry in reversed(list(history.values())):
-        if not isinstance(entry, dict) or not isinstance(entry.get("scene"), dict):
-            continue
-        marker = (entry.get("video"), entry.get("image"))
-        if marker in seen:
-            continue
-        seen.add(marker)
-        recent.append({"location": entry["scene"].get("location"), "camera": entry["scene"].get("camera")})
-        if len(recent) >= 6:
-            break
     attempts = 0
     for item in candidates:
         path = (category / item.get("image", "")).resolve()
@@ -263,29 +252,22 @@ def select_products(client, category, count, history, job, country, seconds):
         reference = prepare_clothing_image(path, job)
         (job / f"01_gpt_analysis_{attempts:03d}_product.json").write_text(
             json.dumps({"name": item.get("name", ""), "image": str(path)}, ensure_ascii=False, indent=2), encoding="utf-8")
-        context = {"product_name": item.get("name", ""), "seconds": seconds, "recent_scenes": recent}
+        context = {"product_name": item.get("name", ""), "seconds": seconds}
         result = ask(client, [{"type": "input_text", "text": analysis_prompt() + "\n" + json.dumps(context, ensure_ascii=False)}, image_input(reference)], job, f"01_gpt_analysis_{attempts:03d}")
-        if not isinstance(result.get("is_clothing"), bool) or not isinstance(result.get("full_outfit"), bool) or not isinstance(result.get("outfit_description"), str) or not result["outfit_description"].strip():
-            raise ValueError(f"GPT 착장 분석 결과에 판정 또는 설명이 없습니다: {path.name}")
-        if not result["is_clothing"]:
-            history[non_clothing_key] = {"status": "non_clothing", "brand": brand, "country": country,
-                "category": category.name, "name": name, "price": price,
-                "outfit_description": result["outfit_description"].strip(),
-                "created_at": datetime.now().isoformat(timespec="seconds")}
-            write_history(history)
-            print(f"의류가 아닌 상품 제외: {name}", flush=True)
-            continue
-        if result.get("full_outfit") is True:
-            location, camera, direction = result.get("location"), result.get("camera"), result.get("scene_prompt")
-            if location not in LOCATIONS or camera not in CAMERAS or not isinstance(direction, str) or not direction.strip() or len(direction) > 800 or "<" in direction or ">" in direction:
+        if not isinstance(result.get("usable"), bool):
+            raise ValueError(f"GPT 사진 분석 결과에 사용 여부가 없습니다: {path.name}")
+        if result["usable"]:
+            background, action = result.get("background"), result.get("action")
+            if (not isinstance(background, str) or not background.strip() or len(background) > 300 or any(c in background for c in "<>{}")
+                    or not isinstance(action, str) or not action.strip()
+                    or len(action) > 300 or any(c in action for c in "<>{}")):
                 raise ValueError(f"GPT 장면 연출 정보가 올바르지 않습니다: {path.name}")
-            scene = {"location": location, "camera": camera, "scene_prompt": direction.strip()}
+            use_runway = bool(re.search(r"\b(?:indoor|interior)\b", background, re.IGNORECASE)
+                              and re.search(r"\b(?:runway|catwalk)\b", background, re.IGNORECASE))
+            scene = {"background": background.strip(), "use_runway_reference": use_runway, "action": action.strip()}
             chosen.append({"name": item.get("name", ""), "price": item.get("price", ""), "image": str(path),
-                           "outfit_description": result["outfit_description"].strip(),
                            "scene": scene,
                            "reference_image": str(reference.relative_to(job)) if reference != path else str(path)})
-            recent.insert(0, {"location": location, "camera": camera})
-            recent = recent[:6]
             selected_keys.add(group_key)
             if len(chosen) == count:
                 return chosen
@@ -293,7 +275,6 @@ def select_products(client, category, count, history, job, country, seconds):
             history[image_key] = {
                 "status": "unusable", "brand": brand, "country": country, "category": category.name,
                 "name": item.get("name", ""), "image": str(path),
-                "outfit_description": result["outfit_description"].strip(),
                 "created_at": datetime.now().isoformat(timespec="seconds"),
             }
             write_history(history)
@@ -304,7 +285,7 @@ def select_products(client, category, count, history, job, country, seconds):
 def plan(client, brand, category, products, job, seconds, country, settings):
     prompt = planning_prompt(brand, category, products, seconds, settings["language"], country)
     title_limit = 10
-    name_limit = 20 if country == "kr" else 40
+    name_limit = 20 if country == "kr" else 24
 
     def valid_lines(value, limit):
         if not isinstance(value, str) or "\r" in value:
@@ -339,6 +320,9 @@ def plan(client, brand, category, products, job, seconds, country, settings):
 def generate_clip(base, references, seconds, output, workflow_name, scene):
     reference_node, prompt_node, prompt_field, output_node, output_field = WORKFLOWS[workflow_name]
     workflow = json.loads((ROOT / "workflow" / f"{workflow_name}.json").read_text(encoding="utf-8-sig"))
+    seed = random.getrandbits(63)
+    workflow["129"]["inputs"]["noise_seed"] = seed
+    print(f"MiniMax 시드: {seed}", flush=True)
     inputs = workflow[reference_node]["inputs"]
     for key in list(inputs):
         if key.startswith(("ref_images.", "ref_videos.", "ref_video_audios.", "ref_audios.")):
@@ -354,7 +338,7 @@ def generate_clip(base, references, seconds, output, workflow_name, scene):
     inputs["width"] = 640
     inputs["height"] = 640
     workflow["132"]["inputs"]["value"] = seconds
-    full_prompt = minimax_prompt(scene, seconds)
+    full_prompt = minimax_prompt(scene, seconds, references[0])
     if len(full_prompt) > 5000:
         raise ValueError("고정 지시를 포함한 MiniMax 프롬프트가 5000자를 초과했습니다")
     (output.parent / f"04_minimax_prompt_{output.stem.removeprefix('04_raw_')}.txt").write_text(full_prompt, encoding="utf-8")
@@ -397,6 +381,12 @@ def render(job, products, title, bgm, seconds, display_names, country):
     ffmpeg = ROOT / "bin" / ("ffmpeg.exe" if os.name == "nt" else "ffmpeg")
     if not ffmpeg.is_file():
         raise FileNotFoundError(f"FFmpeg가 없습니다: {ffmpeg}")
+    watermark_setting = os.environ.get("WATERMARK_ENABLED", "true").strip().lower()
+    if watermark_setting not in ("true", "false"):
+        raise ValueError("WATERMARK_ENABLED는 true 또는 false로 설정하세요")
+    watermark = ROOT / "res" / "watermark.png"
+    if watermark_setting == "true" and not watermark.is_file():
+        raise FileNotFoundError(f"워터마크 파일이 없습니다: {watermark}")
     font_name = {"kr": "Jua-Regular.ttf", "vn": "BeVietnamPro-Bold.ttf", "en": "Montserrat-Bold.ttf"}[country]
     font = ROOT / "font" / font_name
     if not font.is_file():
@@ -416,7 +406,7 @@ def render(job, products, title, bgm, seconds, display_names, country):
             display_name = display_name.replace("·", " ")
         name_lines = [line.strip() for line in display_name.split("\n")]
         (job / f"05_price_{index}.txt").write_text(formatted_price(product["price"], country), encoding="utf-8")
-        name_size = min(52 if country == "kr" else 40, max(20, 960 // max(1, max(map(len, name_lines)))))
+        name_size = 52 if country == "kr" else 40
         name_filters = []
         for line_index, line in enumerate(name_lines):
             filename = f"05_name_{index}_{line_index}.txt"
@@ -432,7 +422,15 @@ def render(job, products, title, bgm, seconds, display_names, country):
                    + f"drawtext=fontfile=05_font.ttf:textfile=05_price_{index}.txt:expansion=none:fontcolor=white:fontsize={48 if country == 'kr' else 40}:x=(w-text_w)/2:y={price_y}")
         subprocess.run([str(ffmpeg), "-y", "-i", f"04_raw_{index}.mp4", "-vf", filters, "-t", str(seconds), "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", f"06_clip_{index}.mp4"], cwd=job, check=True)
     (job / "06_concat.txt").write_text("".join(f"file '06_clip_{i}.mp4'\n" for i in range(len(products))), encoding="utf-8")
-    subprocess.run([str(ffmpeg), "-y", "-f", "concat", "-safe", "0", "-i", "06_concat.txt", "-stream_loop", "-1", "-i", str(bgm), "-t", str(seconds * len(products)), "-c:v", "copy", "-c:a", "aac", "-shortest", "07_final.mp4"], cwd=job, check=True)
+    command = [str(ffmpeg), "-y", "-f", "concat", "-safe", "0", "-i", "06_concat.txt", "-stream_loop", "-1", "-i", str(bgm)]
+    if watermark_setting == "true":
+        command += ["-i", str(watermark), "-filter_complex",
+                    "[2:v]scale=120:-1,format=rgba,colorchannelmixer=aa=0.55[mark];[0:v][mark]overlay=W-w-24:H-h-24:format=auto[v]",
+                    "-map", "[v]", "-map", "1:a:0", "-c:v", "libx264", "-pix_fmt", "yuv420p"]
+    else:
+        command += ["-c:v", "copy"]
+    command += ["-t", str(seconds * len(products)), "-c:a", "aac", "-shortest", "07_final.mp4"]
+    subprocess.run(command, cwd=job, check=True)
 
 
 def main():
@@ -446,6 +444,7 @@ def main():
     seconds = int(os.environ.get("FASION_SECONDS_PER_CLOTHES", "5"))
     if count < 1 or seconds < 1:
         raise ValueError("옷 개수와 옷당 초수는 1 이상이어야 합니다")
+    print(f"영상 설정: 옷 {count}개, 옷당 {seconds}초", flush=True)
     workflow_name = os.environ.get("VIDEO_WORKFLOW", "Deno_MiniMax_H3_R2V_Turbo_8plus2").strip()
     if workflow_name not in WORKFLOWS:
         raise ValueError(f"지원하지 않는 VIDEO_WORKFLOW: {workflow_name}")
@@ -496,17 +495,17 @@ def generate_one(client, categories, slot, face, stage, bgm, count, seconds, wor
     for index, product in enumerate(products):
         print(f"런웨이 생성 중 ({index + 1}/{count}): {product['name']}", flush=True)
         scene = product["scene"]
-        if scene["location"] == "indoor_runway":
+        if scene["use_runway_reference"]:
             if not stage:
                 raise ValueError("실내 런웨이 장면에는 .env의 FASION_STAGE가 필요합니다")
             references = [face, configured_file("FASION_STAGE"), job / product["reference_image"]]
         else:
             references = [face, job / product["reference_image"]]
-        print(f"장소: {scene['location']}, 카메라: {scene['camera']}", flush=True)
+        print(f"배경: {scene['background']}, 동작: {scene['action']}", flush=True)
         generate_clip(base, references, seconds, job / f"04_raw_{index}.mp4", workflow_name, scene)
     print("영상과 BGM 합성 중", flush=True)
     render(job, products, metadata["video_title"], bgm, seconds, metadata["display_names"], country)
-    destination = OUTPUT / country / slot.strftime("%Y-%m-%d") / slot.strftime("%H%M") / job.name
+    destination = OUTPUT / country / slot.strftime("%Y-%m-%d") / slot.strftime("%H%M")
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.exists():
         raise FileExistsError(f"결과 폴더가 이미 있습니다: {destination}")
