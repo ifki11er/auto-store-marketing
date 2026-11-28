@@ -17,7 +17,7 @@ from fasion.prompts import analysis_prompt
 from fasion.video import generate_clip, render
 
 
-# 씬 번호는 영상에 표시되는 순서대로 1부터 시작한다.
+# 씬 번호는 1부터 시작한다. 빈 목록은 기존 씬으로 자막과 영상을 재합성한다.
 JOBS = [
     {"folder": r"C:\d\develop\auto_store_marketing\fasion\output\kr\2026-11-29\1900", "scenes": [1, 2, 3, 4]},
 ]
@@ -70,7 +70,7 @@ def regenerate(job_config):
             or country not in ("kr", "vn", "en")):
         raise ValueError(f"재합성에 필요한 메타데이터가 올바르지 않습니다: {metadata_path}")
     scenes = job_config.get("scenes")
-    if (not isinstance(scenes, list) or not scenes or any(type(i) is not int or i < 1 or i > len(products) for i in scenes)
+    if (not isinstance(scenes, list) or any(type(i) is not int or i < 1 or i > len(products) for i in scenes)
             or len(set(scenes)) != len(scenes)):
         raise ValueError(f"씬 번호는 1~{len(products)} 범위의 중복 없는 목록이어야 합니다: {folder}")
     selected = {number - 1 for number in scenes}
@@ -88,12 +88,13 @@ def regenerate(job_config):
             raise FileNotFoundError(f"유지할 원본 씬이 없습니다: {raw}")
         raw_files.append(raw)
     seconds = clip_duration(folder, len(products))
-    face = required_file(data["influencer_image"], "인플루언서") if data.get("influencer_image") else configured_file(f"FASION_FACE_{country.upper()}")
+    if selected:
+        face = required_file(data["influencer_image"], "인플루언서") if data.get("influencer_image") else configured_file(f"FASION_FACE_{country.upper()}")
     if not data.get("bgm"):
         raise ValueError(f"기존 BGM 정보가 없습니다. 원본 음악 경로를 메타데이터에서 확인하세요: {metadata_path}")
     bgm = required_file(data["bgm"], "기존 BGM")
     workflow = os.environ.get("VIDEO_WORKFLOW", "Deno_MiniMax_H3_R2V_Turbo_8plus2").strip()
-    if workflow not in WORKFLOWS:
+    if selected and workflow not in WORKFLOWS:
         raise ValueError(f"지원하지 않는 VIDEO_WORKFLOW: {workflow}")
     base = os.environ.get("COMFYUI_URL", "http://127.0.0.1:8188").strip().rstrip("/")
 
@@ -103,8 +104,8 @@ def regenerate(job_config):
     token_usage = folder / "05_gpt_token_usage.json"
     if token_usage.is_file():
         shutil.copy2(token_usage, staging / token_usage.name)
-    client = OpenAI()
-    print(f"재생성: {folder} | 씬 {scenes} | 씬당 {seconds}초", flush=True)
+    client = OpenAI() if selected else None
+    print(f"재생성: {folder} | {'씬 ' + str(scenes) if selected else '기존 씬으로 자막 재합성'} | 씬당 {seconds}초", flush=True)
     for index, product in enumerate(products):
         output = staging / f"04_raw_{index}.mp4"
         if index not in selected:
@@ -138,14 +139,16 @@ def regenerate(job_config):
 
     print("최종 영상 재합성 중...", flush=True)
     render(staging, products, title, bgm, seconds, names, country)
-    (staging / metadata_path.name).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    if selected:
+        (staging / metadata_path.name).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
     backup = folder / f"08_재생성_백업_{stamp}"
     backup.mkdir()
     replacements = [f"04_raw_{i}.mp4" for i in sorted(selected)]
     replacements += [f"04_minimax_prompt_{i}.txt" for i in sorted(selected)]
     replacements += [p.name for p in staging.iterdir() if p.is_file() and p.name.startswith("01_gpt_analysis_regen_")]
-    replacements.append(metadata_path.name)
+    if selected:
+        replacements.append(metadata_path.name)
     replacements += [p.name for p in staging.iterdir() if p.is_file() and p.name.startswith(("05_", "06_"))]
     replacements.append("07_final.mp4")
     for name in replacements:

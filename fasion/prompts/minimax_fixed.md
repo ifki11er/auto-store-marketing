@@ -1,6 +1,6 @@
 subject_definitions:
 <Subject 1> is {{FACE_DESCRIPTION}} in <Picture 1>, the person appearing in the video whose identity, face, hairstyle, and body build come exclusively from <Picture 1>, replacing any person in {{GARMENT_PICTURE}}.
-<Subject 2> is strictly the clothing shown in {{GARMENT_PICTURE}}, transferred as wearable items without the body, face, hair, pose, or identity of any person in that picture.
+<Subject 2> is strictly the clothing shown in {{GARMENT_PICTURE}}, transferred as wearable items without the body, face, hair, pose, or identity of any person in that picture. If the picture contains multiple clothing items, use the clothing worn by the person as the reference.
 <Subject 3> is {{LOCATION}}.
 
 summary:

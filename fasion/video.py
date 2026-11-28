@@ -90,6 +90,13 @@ def render(job, products, title, bgm, seconds, display_names, country):
     shutil.copyfile(font, job / "05_font.ttf")
     title_lines = [line.strip().replace("·", " ") if country == "kr" else line.strip() for line in title.split("\n")]
     title_size = min(96 if country == "kr" else 72, max(28, 980 // max(map(len, title_lines))))
+    subscribe_lines = {
+        "kr": ("구독 좋아요", "패션정보는 WOW FIT"),
+        "en": ("Subscribe & Like", "Discover fashion with WOW FIT"),
+        "vn": ("Đăng ký & Thích", "Thời trang cùng WOW FIT"),
+    }[country]
+    for line_index, line in enumerate(subscribe_lines):
+        (job / f"05_subscribe_{line_index}.txt").write_text(line, encoding="utf-8")
     title_filters = []
     for line_index, line in enumerate(title_lines):
         filename = f"05_title_{line_index}.txt"
@@ -116,6 +123,15 @@ def render(job, products, title, bgm, seconds, display_names, country):
                    "pad=1080:1920:0:290:black,"
                    + ",".join(title_filters + name_filters) + ","
                    + f"drawtext=fontfile=05_font.ttf:textfile=05_price_{index}.txt:expansion=none:fontcolor=white:fontsize={48 if country == 'kr' else 40}:x=(w-text_w)/2:y={price_y}")
+        subscribe_start = seconds * len(products) - 2 - seconds * index
+        if subscribe_start < seconds:
+            subscribe_size = 72 if country == "kr" else 52
+            for line_index in range(2):
+                y_offset = -subscribe_size - 6 if line_index == 0 else 6
+                filters += (f",drawtext=fontfile=05_font.ttf:textfile=05_subscribe_{line_index}.txt:"
+                            f"expansion=none:fontcolor=white:fontsize={subscribe_size}:"
+                            f"borderw=3:bordercolor=black:x=(w-text_w)/2:y=(h-text_h)/2{y_offset:+d}:"
+                            f"enable='gte(t\\,{max(0, subscribe_start)})'")
         subprocess.run([str(ffmpeg), "-y", "-i", f"04_raw_{index}.mp4", "-vf", filters, "-t", str(seconds), "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", f"06_clip_{index}.mp4"], cwd=job, check=True)
     (job / "06_concat.txt").write_text("".join(f"file '06_clip_{i}.mp4'\n" for i in range(len(products))), encoding="utf-8")
     command = [str(ffmpeg), "-y", "-f", "concat", "-safe", "0", "-i", "06_concat.txt", "-stream_loop", "-1", "-i", str(bgm)]
