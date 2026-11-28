@@ -8,7 +8,7 @@ summary:
 
 retention_analysis:
 <Subject 1> (appears in [Shot 1]): fully_preserved - preserve the identity, face, hairstyle, and body build from <Picture 1>, with no blending from any person in {{GARMENT_PICTURE}}.
-<Subject 2> (appears in [Shot 1]): attribute_transfer - preserve the sale garment exactly as shown in {{GARMENT_PICTURE}}, including its colors, transparency, and details. Preserve other clothing visible on the wearer as shown.
+<Subject 2> (appears in [Shot 1]): attribute_transfer - preserve the sale garment exactly as shown in {{GARMENT_PICTURE}}, including its colors, transparency, fabric texture, sheen, thickness, weave, and details. Preserve other clothing visible on the wearer as shown.
 {{LOCATION_RETENTION}}
 
 detailed_description:
