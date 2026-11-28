@@ -27,6 +27,7 @@ ROOT = Path(__file__).resolve().parent.parent
 DATA = ROOT / "fasion" / "scraping"
 HISTORY = ROOT / "fasion" / "output" / "history.json"
 OUTPUT = ROOT / "fasion" / "output"
+EXCLUDED_CATEGORIES = {"향수", "perfumes", "nước hoa"}
 WORKFLOWS = {
     "Deno_MiniMax_H3_R2V_Turbo_8plus2": ("235", "186", "text", "144", "gifs"),
     "Deno_minimax_final_R2V_7plus1_memopt_Sol": ("214", "186", "text", "144", "gifs"),
@@ -38,7 +39,12 @@ def load_env():
     for line in (ROOT / ".env").read_text(encoding="utf-8-sig").splitlines():
         key, sep, value = line.strip().partition("=")
         if sep and key.isidentifier():
-            os.environ.setdefault(key, value.strip().strip("\"'"))
+            value = value.strip().strip("\"'")
+            if key == "FASION_BGM" and any(char in os.environ.get(key, "") for char in "\r\n"):
+                os.environ[key] = value
+                print("줄바꿈이 포함된 FASION_BGM 환경 변수를 .env 설정으로 다시 읽었습니다.", flush=True)
+            else:
+                os.environ.setdefault(key, value)
 
 
 def configured_file(key):
@@ -51,6 +57,30 @@ def configured_file(key):
     if not path.is_file():
         raise FileNotFoundError(f"{key} 파일이 없습니다: {path}")
     return path.resolve()
+
+
+def configured_bgm_files():
+    raw = os.environ.get("FASION_BGM", "").strip()
+    if not raw:
+        raise ValueError(".env에 FASION_BGM을 설정하세요")
+    if raw.startswith("["):
+        try:
+            values = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ValueError("FASION_BGM에 음악 파일 경로를 쉼표로 구분해 입력하세요") from exc
+    else:
+        values = raw.split(",")
+    if not isinstance(values, list) or not values or any(not isinstance(v, str) or not v.strip() for v in values):
+        raise ValueError("FASION_BGM에 음악 파일 경로를 하나 이상 설정하세요")
+    files = []
+    for value in values:
+        path = Path(value.strip())
+        if not path.is_absolute():
+            path = ROOT / path
+        if not path.is_file():
+            raise FileNotFoundError(f"FASION_BGM 파일이 없습니다: {path}")
+        files.append(path.resolve())
+    return files
 
 
 def image_input(path):
@@ -225,7 +255,8 @@ def select_products(client, category, count, history, job, country, seconds):
         )
         image_prefix = "invalid_image/v3/" if country == "kr" else f"invalid_image/v3/{country}/"
         image_key = image_prefix + hashlib.sha256(path.read_bytes()).hexdigest()
-        if key in history or group_key in history or legacy_used or group_key in selected_keys or image_key in history:
+        non_clothing_key = "non_clothing/" + group_key
+        if key in history or group_key in history or non_clothing_key in history or legacy_used or group_key in selected_keys or image_key in history:
             continue
         attempts += 1
         print(f"상품 사진 확인: {item.get('name', '')}", flush=True)
@@ -234,8 +265,16 @@ def select_products(client, category, count, history, job, country, seconds):
             json.dumps({"name": item.get("name", ""), "image": str(path)}, ensure_ascii=False, indent=2), encoding="utf-8")
         context = {"product_name": item.get("name", ""), "seconds": seconds, "recent_scenes": recent}
         result = ask(client, [{"type": "input_text", "text": analysis_prompt() + "\n" + json.dumps(context, ensure_ascii=False)}, image_input(reference)], job, f"01_gpt_analysis_{attempts:03d}")
-        if not isinstance(result.get("full_outfit"), bool) or not isinstance(result.get("outfit_description"), str) or not result["outfit_description"].strip():
+        if not isinstance(result.get("is_clothing"), bool) or not isinstance(result.get("full_outfit"), bool) or not isinstance(result.get("outfit_description"), str) or not result["outfit_description"].strip():
             raise ValueError(f"GPT 착장 분석 결과에 판정 또는 설명이 없습니다: {path.name}")
+        if not result["is_clothing"]:
+            history[non_clothing_key] = {"status": "non_clothing", "brand": brand, "country": country,
+                "category": category.name, "name": name, "price": price,
+                "outfit_description": result["outfit_description"].strip(),
+                "created_at": datetime.now().isoformat(timespec="seconds")}
+            write_history(history)
+            print(f"의류가 아닌 상품 제외: {name}", flush=True)
+            continue
         if result.get("full_outfit") is True:
             location, camera, direction = result.get("location"), result.get("camera"), result.get("scene_prompt")
             if location not in LOCATIONS or camera not in CAMERAS or not isinstance(direction, str) or not direction.strip() or len(direction) > 800 or "<" in direction or ">" in direction:
@@ -401,9 +440,8 @@ def main():
     locales = selected_locales()
     if not os.environ.get("OPENAI_API_KEY"):
         raise ValueError("OPENAI_API_KEY가 필요합니다")
-    face = configured_file("FASION_FACE")
     stage = os.environ.get("FASION_STAGE", "").strip()
-    bgm = configured_file("FASION_BGM")
+    bgm_files = configured_bgm_files()
     count = int(os.environ.get("FASION_CLOTHES_COUNT", "4"))
     seconds = int(os.environ.get("FASION_SECONDS_PER_CLOTHES", "5"))
     if count < 1 or seconds < 1:
@@ -417,7 +455,9 @@ def main():
     errors = []
     for country, settings in locales:
         try:
-            categories = sorted(p.parent for p in DATA.glob(f"*/{country}/*/products.csv"))
+            face = configured_file(f"FASION_FACE_{country.upper()}")
+            categories = sorted(p.parent for p in DATA.glob(f"*/{country}/*/products.csv")
+                                if unicodedata.normalize("NFC", p.parent.name).casefold() not in EXCLUDED_CATEGORIES)
             if not categories:
                 raise ValueError(f"{country} 상품 CSV가 없습니다: {DATA}")
             if category_setting.lower() != "random":
@@ -431,6 +471,8 @@ def main():
                     print(f"{country}: 설정한 기간의 영상 공개 시간 슬롯이 모두 채워졌습니다.", flush=True)
                     break
                 print(f"{country} 영상 생성 시작: 공개 예정 {slot:%Y-%m-%d %H:%M}", flush=True)
+                bgm = random.choice(bgm_files)
+                print(f"배경 음악 선택: {bgm.name}", flush=True)
                 generate_one(client, categories, slot, face, stage, bgm, count, seconds, workflow_name, country, settings)
         except Exception as exc:
             errors.append(f"{country}: {exc}")
@@ -449,7 +491,7 @@ def generate_one(client, categories, slot, face, stage, bgm, count, seconds, wor
     print(f"GPT 기록 저장 위치: {job}", flush=True)
     products = select_products(client, category, count, history, job, country, seconds)
     metadata = plan(client, brand, category.name, products, job, seconds, country, settings)
-    (job / "03_metadata.json").write_text(json.dumps({**metadata, "brand": brand, "country": country, "currency": settings["currency"], "category": category.name, "products": products}, ensure_ascii=False, indent=2), encoding="utf-8")
+    (job / "03_metadata.json").write_text(json.dumps({**metadata, "brand": brand, "country": country, "currency": settings["currency"], "category": category.name, "influencer_image": str(face), "bgm": str(bgm), "products": products}, ensure_ascii=False, indent=2), encoding="utf-8")
     base = os.environ.get("COMFYUI_URL", "http://127.0.0.1:8188").strip().rstrip("/")
     for index, product in enumerate(products):
         print(f"런웨이 생성 중 ({index + 1}/{count}): {product['name']}", flush=True)
